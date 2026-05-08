@@ -1,0 +1,13 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#servicePrincipals",
+  "value": [
+    {
+      "id": "11112222-3333-4444-5555-666677778888",
+      "appId": "e8c77dc2-69b3-43f4-bc51-3213c9d915b4",
+      "displayName": "MCP Server for Enterprise",
+      "servicePrincipalType": "Application",
+      "accountEnabled": true,
+      "appOwnerOrganizationId": "f8cdef31-a31e-4b4a-93e4-5f571e91255a"
+    }
+  ]
+}

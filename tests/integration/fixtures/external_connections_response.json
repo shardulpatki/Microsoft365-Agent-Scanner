@@ -1,0 +1,32 @@
+{
+  "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#external/connections",
+  "value": [
+    {
+      "id": "LSEG",
+      "name": "LSEG",
+      "description": "London Stock Exchange Group financial data connector",
+      "state": "ready",
+      "configuration": {
+        "authorizedAppIds": ["00000003-0000-0000-c000-000000000000"]
+      }
+    },
+    {
+      "id": "MoodysAnalytics",
+      "name": "Moody's Analytics",
+      "description": "Moody's risk and financial intelligence",
+      "state": "ready",
+      "configuration": {
+        "authorizedAppIds": []
+      }
+    },
+    {
+      "id": "Notion",
+      "name": "Notion",
+      "description": "Notion workspace pages",
+      "state": "draft",
+      "configuration": {
+        "authorizedAppIds": ["a1b2c3d4-1111-2222-3333-444455556666"]
+      }
+    }
+  ]
+}
