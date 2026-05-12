@@ -136,7 +136,6 @@ async def test_pipeline_runs_both_phase1_discoverers(
     assert doc.status is ScanStatus.completed
     assert doc.summary.mcp_servers_total == 4
     assert doc.summary.mcp_servers_first_party == 4
-    assert doc.stages["resolve"].skipped is True
 
     ensure_data_dir(tmp_path)
     target = scan_dir(tmp_path) / scan_filename(doc.started_at, doc.scan_id)

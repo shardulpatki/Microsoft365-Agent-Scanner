@@ -21,12 +21,14 @@ from m365_mcp_scanner.clients.declarative_resolver import (
 from m365_mcp_scanner.clients.exceptions import (
     ForbiddenError,
     GraphClientError,
+    ManifestNotAvailableError,
     PermissionMissingError,
     ReauthRequiredError,
     TenantNotEligibleError,
 )
 from m365_mcp_scanner.discovery.base import DiscoveryContext, DiscoveryResult
-from m365_mcp_scanner.models import ScanError
+from m365_mcp_scanner.models import AgentPath, NormalizedAgent, ScanError
+from m365_mcp_scanner.models.ids import compute_agent_id
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +155,7 @@ class DeclarativeAgentsTeamsAppDiscoverer:
                 ScanError(
                     stage="discover",
                     surface=self.surface,
+                    code="unknown",
                     message=f"{type(exc).__name__}: {exc}",
                     timestamp=_utcnow(),
                 )
@@ -172,6 +175,48 @@ class DeclarativeAgentsTeamsAppDiscoverer:
                 continue
             try:
                 blob = await graph.get_teams_app_manifest(app_id, def_id)
+            except ManifestNotAvailableError as exc:
+                # Microsoft Graph returns 400 for declarative-agent-only Teams
+                # apps. Emit an agent shell from catalog metadata; MCP wiring
+                # is not discoverable through this path.
+                display_name = (
+                    definition.get("displayName")
+                    or app.get("displayName")
+                    or "(unnamed declarative agent)"
+                )
+                shell_source_ref: dict[str, object] = {
+                    "kind": "teams_app",
+                    "source_id": app_id,
+                    "app_definition_id": def_id,
+                    "publishing_state": definition.get("publishingState"),
+                    "display_name": display_name,
+                    "version": definition.get("version"),
+                    "distribution_method": app.get("distributionMethod"),
+                    "manifest_fetch_status": "unavailable",
+                    "manifest_fetch_reason": (
+                        "Microsoft Graph returns 400 for declarative-agent-only "
+                        "Teams apps; manifest endpoint not usable for this app type"
+                    ),
+                }
+                result.agents.append(
+                    NormalizedAgent(
+                        agent_id=compute_agent_id("declarative", app_id),
+                        path=AgentPath.declarative,
+                        display_name=display_name,
+                        published=definition.get("publishingState") == "published",
+                        source_ref=shell_source_ref,
+                    )
+                )
+                result.errors.append(
+                    ScanError(
+                        stage="discover",
+                        surface=self.surface,
+                        code="manifest_endpoint_unavailable",
+                        message=f"app {app_id}: {exc}",
+                        timestamp=_utcnow(),
+                    )
+                )
+                continue
             except GraphClientError as exc:
                 result.errors.append(
                     ScanError(
@@ -189,6 +234,7 @@ class DeclarativeAgentsTeamsAppDiscoverer:
                     ScanError(
                         stage="discover",
                         surface=self.surface,
+                        code="unknown",
                         message=f"app {app_id}: {type(exc).__name__}: {exc}",
                         timestamp=_utcnow(),
                     )

@@ -110,9 +110,6 @@ async def run_pipeline(
         config_snapshot=settings.snapshot(),
         stages={
             "discover": StageStatus(),
-            "resolve": StageStatus(skipped=True, reason="not implemented in Phase 1"),
-            "enrich": StageStatus(skipped=True, reason="not implemented in Phase 1"),
-            "score": StageStatus(skipped=True, reason="not implemented in Phase 1"),
         },
         summary=ScanSummary(),
     )
@@ -222,7 +219,7 @@ async def run_pipeline(
                     discover.errors.extend(
                         {
                             "surface": e.surface,
-                            "code": e.code,
+                            "code": e.code or "unknown",
                             "message": e.message,
                         }
                         for e in result.errors

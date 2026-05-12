@@ -41,6 +41,28 @@ class ForbiddenError(GraphClientError):
     code = "forbidden"
 
 
+class ManifestNotAvailableError(GraphClientError):
+    """400 from /appCatalogs/teamsApps/.../manifest for declarative-agent-only apps.
+
+    Microsoft Graph's manifest endpoint returns 400 with body
+    ``Resource not found for the segment 'manifest'.`` for Teams apps that
+    embed only a declarative agent (no traditional Teams capabilities).
+    Undocumented behavior. The catalog ``$expand=appDefinitions`` call still
+    succeeds, so callers can emit the agent shell from that metadata.
+    """
+
+    code = "manifest_endpoint_unavailable"
+
+    def __init__(self, app_id: str, def_id: str, body: str) -> None:
+        self.app_id = app_id
+        self.def_id = def_id
+        self.body = body
+        super().__init__(
+            f"manifest endpoint returned 400 for declarative-agent-only "
+            f"Teams app {app_id} (def {def_id}): {body}"
+        )
+
+
 class DataverseAccessDeniedError(RuntimeError):
     """401/403 from a Dataverse Web API call against a specific environment.
 

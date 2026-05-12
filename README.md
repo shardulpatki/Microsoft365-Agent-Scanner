@@ -231,6 +231,19 @@ live API surface differs from (or extends) Microsoft's public docs:
    mechanisms — the first is an invitation-based preview, the second is
    a paid license. (Phase 3 finding.)
 
+4. **Teams App Catalog `/manifest` endpoint returns 400 for
+   declarative-agent-only apps.** Org-distributed Teams apps that embed
+   only a declarative agent (no traditional Teams app surfaces) cannot
+   have their manifest fetched via
+   `/v1.0/appCatalogs/teamsApps/{app-id}/appDefinitions/{def-id}/manifest`;
+   Graph returns `400 BadRequest` with body
+   `"Resource not found for the segment 'manifest'."` The catalog
+   `$expand=appDefinitions` call still succeeds, so the scanner emits
+   the agent shell (display name, version, publishing state) from that
+   metadata and records `code=manifest_endpoint_unavailable`; MCP
+   wiring for these agents is not discoverable through this path.
+   (Phase 3 finding.)
+
 ## Persistence
 
 Scans are stored as JSON files under `~/.m365-mcp-scanner/scans/`. There is no database.

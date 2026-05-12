@@ -103,6 +103,57 @@ async def test_teamsapp_skipped_when_no_delegated_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_teamsapp_manifest_400_emits_agent_shell_no_servers() -> None:
+    """Microsoft Graph returns 400 for declarative-agent-only Teams apps.
+
+    The scanner must still emit an agent (from catalog metadata) and record
+    an informational error with code=manifest_endpoint_unavailable. No MCP
+    server or consumption-edge entries should be emitted.
+    """
+    apps = json.loads(APPS.read_text())
+    error_body = (
+        '{"error":{"code":"BadRequest",'
+        '"message":"Resource not found for the segment \'manifest\'."}}'
+    )
+    with respx.mock(base_url=GRAPH_V1, assert_all_called=False) as router:
+        router.get("/appCatalogs/teamsApps").mock(
+            return_value=httpx.Response(200, json=apps)
+        )
+        router.get(
+            "/appCatalogs/teamsApps/ta-001/appDefinitions/def-001/manifest"
+        ).mock(
+            return_value=httpx.Response(
+                400,
+                content=error_body,
+                headers={"content-type": "application/json"},
+            )
+        )
+        provider: TokenProvider = StaticTokenProvider()
+        delegated_graph = GraphClient(provider)
+        try:
+            ctx = DiscoveryContext(
+                graph=delegated_graph,
+                tenant_id="t",
+                delegated_graph=delegated_graph,
+            )
+            result = await DeclarativeAgentsTeamsAppDiscoverer().discover(ctx)
+        finally:
+            await delegated_graph.aclose()
+
+    assert len(result.agents) == 1
+    assert result.mcp_servers == []
+    assert result.consumption_edges == []
+    assert len(result.errors) == 1
+    assert result.errors[0].code == "manifest_endpoint_unavailable"
+    agent = result.agents[0]
+    assert agent.path.value == "declarative"
+    assert agent.display_name == "Hello MCP Agent"
+    assert agent.published is True
+    assert agent.source_ref["manifest_fetch_status"] == "unavailable"
+    assert agent.source_ref["app_definition_id"] == "def-001"
+
+
+@pytest.mark.asyncio
 async def test_teamsapp_skips_apps_without_copilot_extension() -> None:
     apps = {
         "value": [

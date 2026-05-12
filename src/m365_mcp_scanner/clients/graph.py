@@ -12,6 +12,7 @@ from m365_mcp_scanner.clients.api_recorder import ApiCallRecorder
 from m365_mcp_scanner.clients.base import BaseAsyncClient
 from m365_mcp_scanner.clients.exceptions import (
     ForbiddenError,
+    ManifestNotAvailableError,
     PermissionMissingError,
     ReauthRequiredError,
     TenantNotEligibleError,
@@ -252,6 +253,14 @@ class GraphClient(BaseAsyncClient):
         """
         url = f"/appCatalogs/teamsApps/{app_id}/appDefinitions/{app_definition_id}/manifest"
         resp = await self.request("GET", url)
+        if resp.status_code == 400:
+            body = ""
+            try:
+                body = resp.text
+            except Exception:  # noqa: BLE001 - body decode best-effort only
+                body = ""
+            if "resource not found for the segment 'manifest'" in body.lower():
+                raise ManifestNotAvailableError(app_id, app_definition_id, body)
         if resp.status_code != 200:
             raise _categorize_phase3_403(resp, surface_label="Teams App Catalog")
         return resp.content
