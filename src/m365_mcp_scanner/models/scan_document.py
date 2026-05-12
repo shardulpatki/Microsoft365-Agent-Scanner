@@ -51,6 +51,7 @@ class ScanError(BaseModel):
 
     stage: str
     surface: str | None = None
+    code: str | None = None
     message: str
     timestamp: datetime
 

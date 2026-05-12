@@ -1,0 +1,10 @@
+kind: AdaptiveDialog
+beginDialog:
+  kind: OnRecognizedIntent
+  intent:
+    triggerQueries:
+      - hi
+      - hello
+  actions:
+    - kind: SendActivity
+      activity: Hello!

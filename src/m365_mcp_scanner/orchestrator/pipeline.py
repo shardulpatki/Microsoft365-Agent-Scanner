@@ -4,10 +4,16 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from m365_mcp_scanner.auth import AppOnlyTokenProvider
+from m365_mcp_scanner.auth import AppOnlyTokenProvider, DelegatedTokenProvider
+from m365_mcp_scanner.clients.api_recorder import ApiCallRecorder
 from m365_mcp_scanner.clients.graph import GraphClient
+from m365_mcp_scanner.clients.power_platform_admin import PowerPlatformAdminClient
 from m365_mcp_scanner.config import Settings
 from m365_mcp_scanner.discovery import (
+    CopilotStudioDiscoverer,
+    CustomConnectorsDiscoverer,
+    DeclarativeAgentsPackagesDiscoverer,
+    DeclarativeAgentsTeamsAppDiscoverer,
     DiscoveryContext,
     Discoverer,
     FirstPartyMcpDiscoverer,
@@ -29,16 +35,41 @@ KNOWN_SCOPES = {
     "synced_copilot_connectors",
     "first_party_mcp",
     "copilot_studio",
-    "declarative",
+    "declarative_agents_packages",
+    "declarative_agents_teamsapp",
     "custom_connectors",
     "federated_copilot_connectors",
 }
 
-PHASE_1_SCOPES = {"synced_copilot_connectors", "first_party_mcp"}
+DELEGATED_SCOPES: frozenset[str] = frozenset(
+    {"declarative_agents_packages", "declarative_agents_teamsapp"}
+)
+
+IMPLEMENTED_SCOPES: frozenset[str] = frozenset(
+    {
+        "synced_copilot_connectors",
+        "first_party_mcp",
+        "custom_connectors",
+        "copilot_studio",
+        "declarative_agents_packages",
+        "declarative_agents_teamsapp",
+    }
+)
+
+DEFAULT_SCOPES: tuple[str, ...] = (
+    "synced_copilot_connectors",
+    "first_party_mcp",
+    "custom_connectors",
+    "copilot_studio",
+    "declarative_agents_packages",
+    "declarative_agents_teamsapp",
+)
 
 # Surface aliases — accept legacy/shorthand names without breaking the contract.
-SCOPE_ALIASES: dict[str, str] = {
-    "copilot_connectors": "synced_copilot_connectors",
+SCOPE_ALIASES: dict[str, list[str]] = {
+    "copilot_connectors": ["synced_copilot_connectors"],
+    # "declarative" shorthand expands to both Phase 3 surfaces.
+    "declarative": ["declarative_agents_packages", "declarative_agents_teamsapp"],
 }
 
 
@@ -46,11 +77,29 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def run_pipeline(scope: list[str], settings: Settings) -> ScanDocument:
+def _expand_aliases(raw: list[str]) -> list[str]:
+    """Expand alias scope names to their canonical forms; preserve order, dedupe."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in raw:
+        canonical = SCOPE_ALIASES.get(name, [name])
+        for c in canonical:
+            if c not in seen:
+                out.append(c)
+                seen.add(c)
+    return out
+
+
+async def run_pipeline(
+    scope: list[str],
+    settings: Settings,
+    *,
+    recorder: ApiCallRecorder | None = None,
+) -> ScanDocument:
     started = _utcnow()
     scan_id = compute_scan_id()
-    raw = list(scope) if scope else ["synced_copilot_connectors", "first_party_mcp"]
-    requested = [SCOPE_ALIASES.get(s, s) for s in raw]
+    raw = list(scope) if scope else list(DEFAULT_SCOPES)
+    requested = _expand_aliases(raw)
 
     doc = ScanDocument(
         scan_id=scan_id,
@@ -74,18 +123,19 @@ async def run_pipeline(scope: list[str], settings: Settings) -> ScanDocument:
             ScanError(
                 stage="discover",
                 surface=s,
+                code="unknown_scope",
                 message=f"unknown scope '{s}' — ignored",
                 timestamp=_utcnow(),
             )
         )
-
-    deferred = [s for s in requested if s in KNOWN_SCOPES and s not in PHASE_1_SCOPES]
+    deferred = [s for s in requested if s in KNOWN_SCOPES and s not in IMPLEMENTED_SCOPES]
     for s in deferred:
         doc.errors.append(
             ScanError(
                 stage="discover",
                 surface=s,
-                message=f"surface '{s}' is not implemented in Phase 1; skipping",
+                code="not_implemented",
+                message=f"surface '{s}' is not yet implemented; skipping",
                 timestamp=_utcnow(),
             )
         )
@@ -99,6 +149,14 @@ async def run_pipeline(scope: list[str], settings: Settings) -> ScanDocument:
         discoverers.append(SyncedCopilotConnectorsDiscoverer())
     if "first_party_mcp" in requested:
         discoverers.append(FirstPartyMcpDiscoverer())
+    if "custom_connectors" in requested:
+        discoverers.append(CustomConnectorsDiscoverer())
+    if "copilot_studio" in requested:
+        discoverers.append(CopilotStudioDiscoverer())
+    if "declarative_agents_packages" in requested:
+        discoverers.append(DeclarativeAgentsPackagesDiscoverer())
+    if "declarative_agents_teamsapp" in requested:
+        discoverers.append(DeclarativeAgentsTeamsAppDiscoverer())
 
     if discoverers:
         token_provider = AppOnlyTokenProvider(
@@ -106,28 +164,74 @@ async def run_pipeline(scope: list[str], settings: Settings) -> ScanDocument:
             client_id=settings.client_id,
             client_secret=settings.client_secret.get_secret_value(),
         )
-        async with GraphClient(token_provider) as graph:
-            ctx = DiscoveryContext(graph=graph, tenant_id=settings.tenant_id)
-            for d in discoverers:
-                try:
-                    result = await d.discover(ctx)
-                except Exception as exc:  # noqa: BLE001 - surface isolation
-                    logger.exception("discoverer %s crashed", d.surface)
-                    doc.errors.append(
-                        ScanError(
-                            stage="discover",
-                            surface=d.surface,
-                            message=f"{type(exc).__name__}: {exc}",
-                            timestamp=_utcnow(),
-                        )
-                    )
-                    continue
-                doc.mcp_servers.extend(result.mcp_servers)
-                doc.agents.extend(result.agents)
-                doc.errors.extend(result.errors)
-                discover.errors.extend(
-                    {"surface": e.surface, "message": e.message} for e in result.errors
+        pp_client: PowerPlatformAdminClient | None = None
+        if "custom_connectors" in requested or "copilot_studio" in requested:
+            pp_client = PowerPlatformAdminClient(
+                token_provider=token_provider, recorder=recorder
+            )
+
+        delegated_provider: DelegatedTokenProvider | None = None
+        delegated_graph: GraphClient | None = None
+        wants_delegated = any(s in DELEGATED_SCOPES for s in requested)
+        if wants_delegated:
+            try:
+                delegated_provider = DelegatedTokenProvider(
+                    tenant_id=settings.tenant_id,
+                    client_id=settings.client_id,
                 )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("delegated provider init failed: %s", exc)
+                delegated_provider = None
+            if delegated_provider is not None and delegated_provider.is_logged_in():
+                delegated_graph = GraphClient(
+                    delegated_provider,
+                    recorder=recorder,
+                    client_name="graph_delegated",
+                )
+
+        try:
+            async with GraphClient(
+                token_provider, recorder=recorder, client_name="graph"
+            ) as graph:
+                ctx = DiscoveryContext(
+                    graph=graph,
+                    tenant_id=settings.tenant_id,
+                    power_platform=pp_client,
+                    delegated_graph=delegated_graph,
+                    token_provider=token_provider,
+                    recorder=recorder,
+                )
+                for d in discoverers:
+                    try:
+                        result = await d.discover(ctx)
+                    except Exception as exc:  # noqa: BLE001 - surface isolation
+                        logger.exception("discoverer %s crashed", d.surface)
+                        doc.errors.append(
+                            ScanError(
+                                stage="discover",
+                                surface=d.surface,
+                                message=f"{type(exc).__name__}: {exc}",
+                                timestamp=_utcnow(),
+                            )
+                        )
+                        continue
+                    doc.mcp_servers.extend(result.mcp_servers)
+                    doc.agents.extend(result.agents)
+                    doc.consumption_edges.extend(result.consumption_edges)
+                    doc.errors.extend(result.errors)
+                    discover.errors.extend(
+                        {
+                            "surface": e.surface,
+                            "code": e.code,
+                            "message": e.message,
+                        }
+                        for e in result.errors
+                    )
+        finally:
+            if pp_client is not None:
+                await pp_client.aclose()
+            if delegated_graph is not None:
+                await delegated_graph.aclose()
 
     discover.finished_at = _utcnow()
     discover.duration_ms = int((time.monotonic() - t0) * 1000)

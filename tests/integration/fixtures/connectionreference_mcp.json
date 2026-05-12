@@ -1,0 +1,10 @@
+{
+  "@odata.context": "https://orgtest.crm.dynamics.com/api/data/v9.2/$metadata#connectionreferences",
+  "value": [
+    {
+      "connectionreferenceid": "c1c1c1c1-c1c1-c1c1-c1c1-c1c1c1c1c1c1",
+      "connectionreferencelogicalname": "cra93_tavilyWebSearchAgent.shared_tavilymcp.f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+      "connectorid": "/providers/Microsoft.PowerApps/apis/shared_tavilymcp"
+    }
+  ]
+}

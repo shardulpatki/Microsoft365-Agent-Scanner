@@ -1,0 +1,38 @@
+{
+  "manifestVersion": "1.18",
+  "id": "00000000-0000-0000-0000-deadbeefcafe",
+  "name": "Hello MCP Agent",
+  "developer": {
+    "name": "Theoremlabs"
+  },
+  "copilotExtensions": {
+    "declarativeAgents": [
+      {
+        "id": "hello-mcp-agent",
+        "file": "declarativeAgent.json",
+        "actions": [
+          {
+            "id": "weather_action",
+            "type": "mcpServer",
+            "url": "https://mcp.example.com/weather",
+            "authentication": {
+              "type": "oauth2",
+              "scopes": ["read"]
+            }
+          },
+          {
+            "id": "search_action",
+            "type": "mcpServer",
+            "url": "https://mcp.example.com/search",
+            "authentication": {
+              "type": "apiKey",
+              "in": "header",
+              "name": "X-API-Key",
+              "value": "shouldnotbestored"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

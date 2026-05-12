@@ -1,0 +1,68 @@
+{
+  "value": [
+    {
+      "name": "shared_test_mcp_1",
+      "id": "/providers/Microsoft.PowerApps/apis/shared_test_mcp_1",
+      "type": "Microsoft.PowerApps/apis",
+      "properties": {
+        "displayName": "test_mcp_1",
+        "publisher": "shardulpatki462@vt.edu",
+        "createdTime": "2026-05-01T12:00:00Z",
+        "swagger": {
+          "swagger": "2.0",
+          "info": {"title": "Test MCP Connector", "version": "1.0.0"},
+          "host": "example.com",
+          "basePath": "/",
+          "schemes": ["https"],
+          "paths": {
+            "/mcp": {
+              "post": {
+                "x-ms-agentic-protocol": "mcp-streamable-1.0",
+                "operationId": "InvokeMCP",
+                "responses": {"200": {"description": "Success"}}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "shared_sharepointonline",
+      "id": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+      "type": "Microsoft.PowerApps/apis",
+      "properties": {
+        "displayName": "SharePoint",
+        "publisher": "Microsoft",
+        "createdTime": "2020-01-01T00:00:00Z",
+        "swagger": {
+          "swagger": "2.0",
+          "info": {"title": "SharePoint", "version": "1.0.0"},
+          "host": "graph.microsoft.com",
+          "basePath": "/v1.0",
+          "schemes": ["https"],
+          "paths": {
+            "/sites": {
+              "get": {
+                "operationId": "GetSites",
+                "responses": {"200": {"description": "Success"}}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "shared_legacy_mcp",
+      "id": "/providers/Microsoft.PowerApps/apis/shared_legacy_mcp",
+      "type": "Microsoft.PowerApps/apis",
+      "properties": {
+        "displayName": "Legacy Top-Level MCP",
+        "publisher": "shardulpatki462@vt.edu",
+        "createdTime": "2025-01-01T00:00:00Z",
+        "apiDefinitions": {
+          "originalSwaggerUrl": "https://blob.example.com/swagger/legacy.json"
+        }
+      }
+    }
+  ]
+}

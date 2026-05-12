@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import AsyncIterator
 from types import TracebackType
 from typing import Any, Self
@@ -10,6 +11,7 @@ from typing import Any, Self
 import httpx
 
 from m365_mcp_scanner.auth.token_provider import TokenProvider
+from m365_mcp_scanner.clients.api_recorder import ApiCallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -55,12 +57,17 @@ class BaseAsyncClient:
         burst: float = 20.0,
         max_retries: int = 5,
         timeout: float = 30.0,
+        recorder: ApiCallRecorder | None = None,
+        client_name: str = "",
     ) -> None:
         self._token_provider = token_provider
         self._scope = scope
         self._bucket = TokenBucket(rate=rate, capacity=burst)
         self._max_retries = max_retries
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
+        self._base_url = base_url
+        self._recorder = recorder
+        self._client_name = client_name
 
     async def __aenter__(self) -> Self:
         return self
@@ -91,6 +98,8 @@ class BaseAsyncClient:
         await self._bucket.acquire()
         headers = await self._auth_headers()
         attempt = 0
+        t0 = time.perf_counter()
+        full_url = url if url.startswith("http") else f"{self._base_url}{url}"
         while True:
             attempt += 1
             try:
@@ -99,6 +108,14 @@ class BaseAsyncClient:
                 )
             except httpx.TransportError as exc:
                 if attempt >= self._max_retries:
+                    self._record(
+                        method=method,
+                        url=full_url,
+                        status=None,
+                        elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                        attempts=attempt,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                     raise
                 delay = self._backoff(attempt)
                 logger.warning("transport error %s on %s; retrying in %.1fs", exc, url, delay)
@@ -116,11 +133,47 @@ class BaseAsyncClient:
                 )
                 await asyncio.sleep(delay)
                 continue
+            err: str | None = None
+            if response.status_code >= 400:
+                try:
+                    err = response.text[:2048]
+                except Exception:  # noqa: BLE001
+                    err = None
+            self._record(
+                method=method,
+                url=str(response.request.url),
+                status=response.status_code,
+                elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                attempts=attempt,
+                error=err,
+            )
             return response
+
+    def _record(
+        self,
+        *,
+        method: str,
+        url: str,
+        status: int | None,
+        elapsed_ms: float,
+        attempts: int,
+        error: str | None,
+    ) -> None:
+        if self._recorder is None:
+            return
+        self._recorder.record(
+            client=self._client_name,
+            method=method,
+            url=url,
+            status=status,
+            elapsed_ms=elapsed_ms,
+            attempts=attempts,
+            error=error,
+        )
 
     @staticmethod
     def _backoff(attempt: int) -> float:
-        return min(30.0, (2 ** (attempt - 1)) + random.uniform(0, 0.5))
+        return float(min(30.0, (2 ** (attempt - 1)) + random.uniform(0, 0.5)))
 
     async def get_json(self, url: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         resp = await self.request("GET", url, params=params)
@@ -133,14 +186,18 @@ class BaseAsyncClient:
         *,
         params: dict[str, Any] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Yield each row across @odata.nextLink pages."""
+        """Yield each row across paginated responses.
+
+        Supports both Graph-style ``@odata.nextLink`` and the bare ``nextLink``
+        used by Power Platform / Power Apps admin APIs.
+        """
         next_url: str | None = url
         next_params = params
         while next_url:
             payload = await self.get_json(next_url, params=next_params)
             for item in payload.get("value", []):
                 yield item
-            next_link = payload.get("@odata.nextLink")
+            next_link = payload.get("@odata.nextLink") or payload.get("nextLink")
             if not next_link:
                 return
             next_url = next_link

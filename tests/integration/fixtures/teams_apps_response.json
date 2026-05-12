@@ -1,0 +1,17 @@
+{
+  "value": [
+    {
+      "id": "ta-001",
+      "displayName": "Hello MCP Agent",
+      "distributionMethod": "organization",
+      "appDefinitions": [
+        {
+          "id": "def-001",
+          "version": "1.0.0",
+          "publishingState": "published",
+          "displayName": "Hello MCP Agent"
+        }
+      ]
+    }
+  ]
+}

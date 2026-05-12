@@ -1,0 +1,22 @@
+{
+  "value": [
+    {
+      "id": "/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/a787c566-03fd-e1c6-972d-9549daaad71c",
+      "name": "a787c566-03fd-e1c6-972d-9549daaad71c",
+      "type": "Microsoft.BusinessAppPlatform/scopes/environments",
+      "location": "unitedstates",
+      "properties": {
+        "displayName": "mcp-scanner-test",
+        "environmentSku": "Production",
+        "linkedEnvironmentMetadata": {
+          "instanceApiUrl": "https://orgtest.crm.dynamics.com",
+          "domainName": "orgtest"
+        },
+        "states": {
+          "management": {"id": "Ready"},
+          "runtime": {"id": "Enabled"}
+        }
+      }
+    }
+  ]
+}

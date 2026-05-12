@@ -1,0 +1,11 @@
+kind: TaskDialog
+modelDisplayName: Tavily MCP
+modelDescription: Search the web via Tavily's MCP server.
+action:
+  kind: InvokeExternalAgentTaskAction
+  connectionReference: cra93_tavilyWebSearchAgent.shared_tavilymcp.f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1
+  connectionProperties:
+    mode: Invoker
+  operationDetails:
+    kind: ModelContextProtocolMetadata
+    operationId: InvokeServer

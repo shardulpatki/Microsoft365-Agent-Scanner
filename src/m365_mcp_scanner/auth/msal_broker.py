@@ -1,13 +1,36 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import msal
 
+from m365_mcp_scanner.auth import file_cache
+
+logger = logging.getLogger(__name__)
+
 GRAPH_DEFAULT_SCOPE = "https://graph.microsoft.com/.default"
+POWER_PLATFORM_DEFAULT_SCOPE = "https://service.powerapps.com/.default"
+
+
+def dataverse_scope(org_url: str) -> str:
+    """Build the AAD scope string for a Dataverse org's Web API.
+
+    Example: ``https://contoso.crm.dynamics.com`` -> ``https://contoso.crm.dynamics.com/.default``.
+    """
+    return f"{org_url.rstrip('/')}/.default"
+
+# Delegated scopes used during device-code login. ``.default`` reflects whatever
+# permissions the Entra app has been admin-consented for, so adding more
+# permissions later does not require a code change here.
+DELEGATED_LOGIN_SCOPES: tuple[str, ...] = (
+    "https://graph.microsoft.com/.default",
+)
 
 
 class AuthError(RuntimeError):
@@ -55,15 +78,166 @@ class AppOnlyTokenProvider:
         return access
 
 
+DeviceFlowCallback = Callable[[dict[str, Any]], None]
+
+
 class DelegatedTokenProvider:
-    """Phase 3 — device code flow with keyring-cached refresh tokens."""
+    """Device-code flow with file-cached (encrypted) refresh tokens.
 
-    async def get_token(self, scope: str) -> str:  # pragma: no cover - phase 3
-        raise NotImplementedError("delegated auth lands in Phase 3")
+    ``get_token`` first tries silent acquisition from the cache. If no account
+    is cached, raises :class:`AuthError` — callers must run
+    :meth:`login` (interactive device flow) first. The interactive path is
+    isolated from :meth:`get_token` so a scan run cannot accidentally trigger
+    a browser prompt mid-execution.
+    """
+
+    def __init__(
+        self,
+        tenant_id: str,
+        client_id: str,
+        *,
+        cache_dir: Path | None = None,
+    ) -> None:
+        if not (tenant_id and client_id):
+            raise AuthError(
+                "tenant_id and client_id are required for delegated auth"
+            )
+        self._tenant_id = tenant_id
+        self._client_id = client_id
+        self._cache_dir = cache_dir
+        self._cache = msal.SerializableTokenCache()
+        self._load_cache()
+        # MSAL's ``PublicClientApplication`` constructor performs an OIDC
+        # discovery network call. Defer construction until first use so
+        # cheap inspection (``is_logged_in``, ``clear_cache``) never makes a
+        # network call and so unit tests can run offline.
+        self._app: msal.PublicClientApplication | None = None
+        self._token_cache: dict[str, _CachedToken] = {}
+        self._lock = asyncio.Lock()
+
+    def _get_app(self) -> msal.PublicClientApplication:
+        if self._app is None:
+            self._app = msal.PublicClientApplication(
+                client_id=self._client_id,
+                authority=f"https://login.microsoftonline.com/{self._tenant_id}",
+                token_cache=self._cache,
+            )
+        return self._app
+
+    # ---- cache plumbing -------------------------------------------------
+
+    def _load_cache(self) -> None:
+        blob = file_cache.load(
+            self._tenant_id, self._client_id, cache_dir=self._cache_dir
+        )
+        if blob:
+            try:
+                self._cache.deserialize(blob)
+            except Exception:  # noqa: BLE001 - corrupt cache should not crash
+                logger.warning("delegated token cache was corrupt; discarding")
+
+    def _persist_cache(self) -> None:
+        if self._cache.has_state_changed:
+            file_cache.save(
+                self._tenant_id,
+                self._client_id,
+                self._cache.serialize(),
+                cache_dir=self._cache_dir,
+            )
+
+    # ---- interface ------------------------------------------------------
+
+    def _cached_accounts(self) -> list[dict[str, Any]]:
+        """Read accounts straight from the serialized cache (no network)."""
+        accounts = self._cache.find(msal.TokenCache.CredentialType.ACCOUNT)
+        return list(accounts) if accounts else []
+
+    def is_logged_in(self) -> bool:
+        return bool(self._cached_accounts())
+
+    def account_username(self) -> str | None:
+        accounts = self._cached_accounts()
+        if not accounts:
+            return None
+        return str(accounts[0].get("username") or "")
+
+    def clear_cache(self) -> None:
+        file_cache.clear(
+            self._tenant_id, self._client_id, cache_dir=self._cache_dir
+        )
+        # Drop the in-memory MSAL state so subsequent calls reflect logout.
+        # The MSAL app is rebuilt lazily on next use.
+        self._cache = msal.SerializableTokenCache()
+        self._app = None
+        self._token_cache.clear()
+
+    async def login(
+        self,
+        *,
+        scopes: list[str] | None = None,
+        on_prompt: DeviceFlowCallback | None = None,
+    ) -> dict[str, Any]:
+        """Run device-code flow, persist refresh token to keyring, return token result."""
+        scopes = scopes or list(DELEGATED_LOGIN_SCOPES)
+        result = await asyncio.to_thread(
+            self._login_blocking, scopes, on_prompt
+        )
+        self._persist_cache()
+        return result
+
+    def _login_blocking(
+        self, scopes: list[str], on_prompt: DeviceFlowCallback | None
+    ) -> dict[str, Any]:
+        app = self._get_app()
+        flow = app.initiate_device_flow(scopes=scopes)
+        if "user_code" not in flow:
+            err = flow.get("error_description") or flow.get("error") or "unknown error"
+            raise AuthError(f"device flow initiation failed: {err}")
+        if on_prompt is not None:
+            on_prompt(flow)
+        result: dict[str, Any] = app.acquire_token_by_device_flow(flow)
+        if "access_token" not in result:
+            err = result.get("error_description") or result.get("error") or "unknown error"
+            raise AuthError(f"device flow did not yield a token: {err}")
+        return result
+
+    async def get_token(self, scope: str = GRAPH_DEFAULT_SCOPE) -> str:
+        async with self._lock:
+            cached = self._token_cache.get(scope)
+            if cached and cached.expires_at - 60 > time.time():
+                return cached.value
+            return await asyncio.to_thread(self._silent_blocking, scope)
+
+    def _silent_blocking(self, scope: str) -> str:
+        if not self._cached_accounts():
+            raise AuthError(
+                "no delegated session — run `mcp-scan login` first"
+            )
+        app = self._get_app()
+        accounts = app.get_accounts()
+        if not accounts:
+            raise AuthError(
+                "no delegated session — run `mcp-scan login` first"
+            )
+        result: dict[str, Any] | None = app.acquire_token_silent(
+            scopes=[scope], account=accounts[0]
+        )
+        if not result or "access_token" not in result:
+            err = (
+                (result or {}).get("error_description")
+                or (result or {}).get("error")
+                or "silent token acquisition returned no token"
+            )
+            raise AuthError(
+                f"delegated token refresh failed for {scope}: {err}; "
+                "run `mcp-scan login` to re-authenticate"
+            )
+        access = str(result["access_token"])
+        expires_in = int(result.get("expires_in", 3600))
+        self._token_cache[scope] = _CachedToken(
+            value=access, expires_at=time.time() + expires_in
+        )
+        self._persist_cache()
+        return access
 
 
-class DataverseTokenProvider:
-    """Phase 2 — per-org Dataverse tokens (audience https://{org}.crm.dynamics.com)."""
-
-    async def get_token(self, scope: str) -> str:  # pragma: no cover - phase 2
-        raise NotImplementedError("Dataverse auth lands in Phase 2")
