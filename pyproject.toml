@@ -30,6 +30,10 @@ dev = [
     "mypy>=1.10",
     "types-PyYAML>=6.0",
 ]
+ui = [
+    "streamlit>=1.30",
+    "pandas>=2.0",
+]
 
 [project.scripts]
 mcp-scan = "m365_mcp_scanner.cli.main:app"
@@ -49,4 +53,8 @@ plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 module = ["msal", "msal.*", "keyring", "keyring.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["streamlit", "streamlit.*", "pandas", "pandas.*"]
 ignore_missing_imports = true

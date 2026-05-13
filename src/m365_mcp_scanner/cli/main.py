@@ -307,5 +307,35 @@ def _resolve_scan_path(data_dir: Path, scan: str | None) -> Path | None:
     return None
 
 
+@app.command()
+def ui(
+    port: int = typer.Option(8501, "--port"),
+    scan: str | None = typer.Option(None, "--scan", help="Pre-select a scan id"),
+) -> None:
+    """Launch the local web UI."""
+    import os
+    from importlib.resources import files
+
+    from m365_mcp_scanner import ui as ui_pkg
+
+    app_path = files(ui_pkg) / "app.py"
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.port",
+        str(port),
+        "--server.address",
+        "127.0.0.1",
+        "--browser.gatherUsageStats",
+        "false",
+    ]
+    if scan:
+        cmd += ["--", "--scan-id", scan]
+    os.execvp(cmd[0], cmd)
+
+
 if __name__ == "__main__":
     app()
