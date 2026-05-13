@@ -205,9 +205,19 @@ def run(
         "--md/--no-md",
         help="Also emit a Markdown report next to the JSON capturing every API call and error.",
     ),
+    probe: bool = typer.Option(
+        False,
+        "--probe",
+        help=(
+            "Issue outbound HEAD calls to non-Microsoft MCP server URLs to "
+            "fingerprint advertised tools."
+        ),
+    ),
 ) -> None:
     """Run a scan."""
     settings = Settings()
+    if probe:
+        settings.probe_enabled = True
     scopes = [s.strip() for s in scope.split(",") if s.strip()]
 
     async def _exec() -> int:

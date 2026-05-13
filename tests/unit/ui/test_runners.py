@@ -57,3 +57,17 @@ def test_run_scan_cmd_omits_scope_when_none(fake_streamlit: types.ModuleType) ->
 
     cmd = run_scan_cmd()
     assert "--scope" not in cmd
+
+
+def test_run_scan_cmd_includes_probe_when_enabled(fake_streamlit: types.ModuleType) -> None:
+    from m365_mcp_scanner.ui.runners import run_scan_cmd
+
+    cmd = run_scan_cmd(probe=True)
+    assert "--probe" in cmd
+
+
+def test_run_scan_cmd_omits_probe_by_default(fake_streamlit: types.ModuleType) -> None:
+    from m365_mcp_scanner.ui.runners import run_scan_cmd
+
+    assert "--probe" not in run_scan_cmd()
+    assert "--probe" not in run_scan_cmd(probe=False)

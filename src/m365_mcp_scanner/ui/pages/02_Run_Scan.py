@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-
 import streamlit as st
 
 from m365_mcp_scanner.config import Settings
@@ -50,9 +48,6 @@ st.slider(
 
 def _on_run() -> None:
     cmd = run_scan_cmd(scope=scope or None, probe=probe)
-    env = os.environ.copy()
-    if probe:
-        env["M365_MCP_PROBE_ENABLED"] = "true"
 
     folder = scans_dir(settings)
     before = set(folder.glob("*.json")) if folder.exists() else set()

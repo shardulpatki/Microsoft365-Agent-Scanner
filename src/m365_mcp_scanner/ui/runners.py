@@ -50,11 +50,7 @@ def run_scan_cmd(
     if scope:
         cmd += ["--scope", ",".join(scope)]
     if probe:
-        # Probe is currently driven by the M365_MCP_PROBE_ENABLED env var or
-        # the config-file setting; the CLI does not expose a --probe flag yet.
-        # The Run Scan page sets the env var in its subprocess environment
-        # rather than embedding the flag here.
-        pass
+        cmd.append("--probe")
     if out is not None:
         cmd += ["--out", str(out)]
     return cmd
