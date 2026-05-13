@@ -5,7 +5,7 @@ M365 Agents Toolkit: the toolkit packages each agent as a Teams app and the
 deploy step registers it under the tenant's organization-distributed apps.
 The agent's MCP wiring lives in the manifest's ``actions`` block.
 
-Required delegated permissions: ``AppCatalog.Read.All`` (or
+Required delegated permissions: ``TeamsApp.Read.All`` (or
 ``Directory.Read.All``) plus ``User.Read``.
 """
 from __future__ import annotations
@@ -120,7 +120,7 @@ class DeclarativeAgentsTeamsAppDiscoverer:
                     surface=self.surface,
                     code="permission_missing",
                     message=(
-                        "delegated permission AppCatalog.Read.All / "
+                        "delegated permission TeamsApp.Read.All / "
                         f"Directory.Read.All missing: {exc}"
                     ),
                     timestamp=_utcnow(),

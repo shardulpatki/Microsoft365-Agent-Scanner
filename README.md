@@ -11,10 +11,31 @@ CLI tool that discovers MCP (Model Context Protocol) server usage across a Micro
 | Synced Copilot Connectors (Microsoft Graph connectors) | ✅ shipping | `GET /external/connections` |
 | First-party MCP servers | ✅ shipping | `GET /servicePrincipals?$filter=appId eq '…'` |
 | Custom connectors with MCP shape | ✅ shipping | Power Platform admin + Power Apps connector defs |
-| Declarative agents — Teams App Catalog | ✅ shipping (delegated) | `GET /v1.0/appCatalogs/teamsApps` |
+| Declarative agents — Teams App Catalog | ✅ shipping (delegated, partial — see manifest gap) | `GET /v1.0/appCatalogs/teamsApps` |
 | Declarative agents — Copilot Packages | ✅ shipping (delegated, Agent 365 license required) | `GET /beta/copilot/admin/catalog/packages` |
 | Copilot Studio agents with MCP tools | ✅ shipping | Power Platform admin + Dataverse `bots` / `botcomponents` |
 | **Federated Copilot Connectors (MCP-tagged)** | 🚧 **Phase 6 — blocked** | No public Graph API yet; managed via `Connector.Cmd` PowerShell module + internal admin-center API |
+
+### What a scan typically produces
+
+Against the project's dev tenant (no Microsoft 365 Copilot license, no
+Agent 365 license), a full scan in ~12 seconds returns:
+
+- 6 MCP servers across two surfaces (custom Power Platform connectors,
+  Copilot Studio agents)
+- 3 agents (2 Copilot Studio, 1 declarative agent discovered via the
+  Teams App Catalog)
+- 2 consumption edges (Copilot Studio agents to their MCP servers; the
+  declarative agent's wiring is behind the manifest endpoint gap)
+- 4 categorized errors: 2 `no_dataverse_access` for envs without an
+  application user, 1 `tenant_not_eligible` for the Copilot Packages
+  API, 1 `manifest_endpoint_unavailable` for the declarative agent's
+  manifest
+
+Counts in a real customer tenant will be different. In a tenant with
+Microsoft 365 Copilot licensing and Agent 365 licensing assigned to the
+admin running `mcp-scan login`, the first-party MCP and Copilot Packages
+surfaces also produce findings.
 
 ### Custom connectors with MCP shape
 
@@ -61,9 +82,13 @@ block (`type: "mcpServer"`). Two Graph surfaces expose them:
 * **Teams App Catalog** (`/v1.0/appCatalogs/teamsApps`) — the practical demo
   path. Each org-distributed Teams app's manifest is fetched and parsed for
   MCP-shaped actions. Works against any tenant where the scanner's app has
-  been admin-consented `AppCatalog.Read.All` (or `Directory.Read.All`).
-  Live-validated in Phase 3 against the dev tenant: API returns 200 OK with
-  an empty array (no org-distributed declarative agents in the tenant).
+  been admin-consented `TeamsApp.Read.All` (or `Directory.Read.All`).
+  Live-validated in Phase 3 against the dev tenant. The catalog query
+  returns the org-distributed declarative agent, but Microsoft Graph's
+  per-app manifest endpoint returns 400 for declarative-agent-only Teams
+  apps (see *Undocumented Microsoft behaviors* §4). The scanner emits the
+  agent shell from the `$expand=appDefinitions` metadata and records
+  `code=manifest_endpoint_unavailable` for the missing manifest detail.
 * **Copilot Packages** (`/beta/copilot/admin/catalog/packages`) — gated by
   **Agent 365 licensing**, not by the Frontier preview program as we
   originally documented. Live testing returned an authoritative Microsoft
@@ -121,6 +146,10 @@ mcp-scan servers list
 # JSON output for piping
 mcp-scan run --format json | jq '.mcp_servers | length'
 ```
+
+For full tenant provisioning (Entra app registration, permission grants,
+per-environment Dataverse access), see
+[docs/tenant-setup.md](docs/tenant-setup.md).
 
 The legacy alias `--scope copilot_connectors` is still accepted and resolves to
 `synced_copilot_connectors`. The shorthand `--scope declarative` expands to
@@ -185,9 +214,15 @@ run normally.
 
 | Permission | Used for |
 |---|---|
-| `AppCatalog.Read.All` (or `Directory.Read.All`) | `declarative_agents_teamsapp` |
+| `TeamsApp.Read.All` (or `Directory.Read.All` as fallback) | `declarative_agents_teamsapp` |
 | `CopilotPackages.Read.All` | `declarative_agents_packages` (Agent 365-licensed tenants) |
 | `User.Read` | identity resolution after device-code login |
+
+The runbook (`docs/tenant-setup.md`) also lists
+`DelegatedPermissionGrant.Read.All`, `AuditLog.Read.All`, and
+`User.Read.All` as provisioned application permissions. These are
+reserved for a forthcoming scoring stage and can be omitted in a
+least-privilege initial deployment.
 
 **Power Platform admin** (one-time PowerShell registration of the SP, not a
 Graph permission):
@@ -204,7 +239,7 @@ connectors via `api.bap.microsoft.com` / `api.powerapps.com`. Required for the
 
 ## Undocumented Microsoft behaviors
 
-Engineering notes from building this scanner — three places where the
+Engineering notes from building this scanner — four places where the
 live API surface differs from (or extends) Microsoft's public docs:
 
 1. **Power Apps custom-connector swagger via SAS-signed Azure Blob URL.**

@@ -218,7 +218,7 @@ class GraphClient(BaseAsyncClient):
     ) -> AsyncIterator[dict[str, Any]]:
         """Iterate Teams apps in the tenant catalog with their appDefinitions expanded.
 
-        Requires delegated ``AppCatalog.Read.All`` or ``Directory.Read.All``.
+        Requires delegated ``TeamsApp.Read.All`` or ``Directory.Read.All``.
         Returns the raw payload rows; each row carries ``appDefinitions`` so
         callers can identify the latest definition without a second round-trip.
         """
