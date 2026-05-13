@@ -6,7 +6,7 @@ End-to-end provisioning of permissions, app registration, role assignments, and 
 |---|---|
 | **Audience** | Tenant administrator with Global Admin or equivalent rights |
 | **Time required** | 30 minutes one-time + 5 minutes per Power Platform environment |
-| **Prerequisites** | Global Administrator role; Azure CLI optionally for the scripted path |
+| **Prerequisites** | Global Administrator role |
 | **Output** | Tenant ID, client ID, client secret, and a service principal provisioned across the right scopes |
 
 ---
@@ -17,18 +17,17 @@ End-to-end provisioning of permissions, app registration, role assignments, and 
 2. [Surface coverage and permission justification](#2-surface-coverage-and-permission-justification)
 3. [Network egress requirements](#3-network-egress-requirements)
 4. [Step-by-step setup](#4-step-by-step-setup)
-5. [Scripted setup (optional)](#5-scripted-setup-optional)
-6. [Configure and run the scanner](#6-configure-and-run-the-scanner)
-7. [Troubleshooting](#7-troubleshooting)
-8. [Decommissioning the scanner](#8-decommissioning-the-scanner)
-9. [Reference](#9-reference)
-10. [Document control](#10-document-control)
+5. [Configure and run the scanner](#5-configure-and-run-the-scanner)
+6. [Troubleshooting](#6-troubleshooting)
+7. [Decommissioning the scanner](#7-decommissioning-the-scanner)
+8. [Reference](#8-reference)
+9. [Document control](#9-document-control)
 
 ---
 
 ## 1. Overview
 
-This runbook walks a tenant administrator through everything required to enable the M365 MCP Scanner against a Microsoft 365 tenant. Setup completes in approximately 30 minutes and consists of five distinct configuration steps.
+This runbook walks a tenant administrator through everything required to enable the M365 MCP Scanner against a Microsoft 365 tenant. Setup completes in approximately 30 minutes and consists of six distinct configuration steps.
 
 The scanner is a read-only security tool. It enumerates Model Context Protocol (MCP) server usage across the tenant by querying Microsoft Graph, Power Platform admin APIs, and Dataverse. It performs no write operations, no data modifications, and no automated remediation. All findings are stored locally on the operator's machine.
 
@@ -67,7 +66,7 @@ The scanner covers six distinct surfaces where MCP servers can exist in a Micros
 
 ### Additional permissions for future enrichment
 
-The scanner is built to support a forthcoming Score stage that will enrich findings with consent and runtime activity data. Two additional permissions are granted now to avoid a second consent flow later:
+Two additional permissions are granted now to avoid a second consent flow later:
 
 - `DelegatedPermissionGrant.Read.All` — read OAuth permission grants for MCP servers; used by the score stage to compute consent scope risk
 - `AuditLog.Read.All` — read Graph activity logs; used by the score stage to identify dormant or never-invoked MCP wirings
@@ -99,7 +98,7 @@ Probing is off by default. If your security policy disallows outbound calls to n
 
 ## 4. Step-by-step setup
 
-This section describes the manual click-through setup. A scripted version using Azure CLI is provided in [Section 5](#5-scripted-setup-optional) for environments where automation is preferred.
+This section walks through the six configuration steps required to provision the scanner against a fresh Microsoft 365 tenant. Each step is performed once, except Step 6, which is repeated per Power Platform environment.
 
 ### Step 1: Create the Entra ID application registration
 
@@ -218,39 +217,7 @@ Verify the application user was created by refreshing the Application users list
 
 ---
 
-## 5. Scripted setup (optional)
-
-For environments that prefer infrastructure-as-code or automated provisioning, the steps in [Section 4](#4-step-by-step-setup) can be partially automated using Azure CLI. The Dataverse application user step (Step 6) must remain manual because the Power Platform Admin Center does not currently expose a stable API for application user creation.
-
-### Prerequisites
-
-- Azure CLI installed (verify with `az --version`)
-- Sign in via `az login --tenant <tenant-id>`
-- Current user must hold Global Administrator or equivalent rights
-
-### Script outline
-
-The setup script performs the following operations:
-
-1. `az ad app create` — creates the app registration
-2. `az ad app update --set isFallbackPublicClient=true` — enables public client flows
-3. `az ad sp create` — creates the service principal
-4. `az ad app permission add` (×8) — adds the required Graph permissions
-5. `az ad app permission admin-consent` — attempts admin consent (may require manual fallback)
-6. `az ad app credential reset` — creates the client secret
-7. `az rest` to Graph — activates the Power Platform Administrator role and assigns the service principal
-
-The complete script is available in the scanner repository as `setup-scanner.sh`. Use it as follows:
-
-```bash
-./setup-scanner.sh <tenant-id> ["App display name"]
-```
-
-After the script completes, perform Step 6 manually for each environment, then proceed to [Section 6](#6-configure-and-run-the-scanner) to configure the scanner.
-
----
-
-## 6. Configure and run the scanner
+## 5. Configure and run the scanner
 
 ### Configuration
 
@@ -302,7 +269,7 @@ If any check fails, the error message indicates which setup step needs revisitin
 
 ### Enable delegated session (one-time, per machine)
 
-Surfaces 5a and 5b use delegated authentication. A one-time interactive sign-in is required before these surfaces will function. The cached refresh token persists for approximately 90 days.
+The two declarative-agent surfaces use delegated authentication. A one-time interactive sign-in is required before these surfaces will function. The cached refresh token persists for approximately 90 days.
 
 ```bash
 mcp-scan login
@@ -334,7 +301,7 @@ mcp-scan run --probe
 
 ---
 
-## 7. Troubleshooting
+## 6. Troubleshooting
 
 ### Login error AADSTS7000218
 
@@ -352,7 +319,7 @@ mcp-scan run --probe
 
 **Fix:** Ensure you are running a recent version of the scanner. The file-based cache was introduced to bypass this Windows limitation entirely.
 
-### Surface 5a returns tenant_not_eligible
+### Copilot Packages surface returns tenant_not_eligible
 
 **Symptom:** A scan completes but the Copilot Packages surface reports "tenant not eligible for Copilot Packages API: Customer must be a licensed for Agent 365 in order to use Agent 365 Graph APIs."
 
@@ -360,11 +327,11 @@ mcp-scan run --probe
 
 **Fix:** This is expected behavior in tenants without Agent 365. The scanner code is functioning correctly; the surface simply has no data to return. In a tenant with Agent 365 licensing, this surface returns declarative agent records normally.
 
-### Surface 5b returns delegated_session_required
+### Teams App Catalog surface returns delegated_session_required
 
 **Symptom:** The Teams App Catalog surface reports "delegated session required for Teams App Catalog; run `mcp-scan login` to enable this surface."
 
-**Cause:** Surface 5b uses delegated authentication and no cached session exists.
+**Cause:** The Teams App Catalog surface uses delegated authentication and no cached session exists.
 
 **Fix:** Run `mcp-scan login` once. The cached refresh token persists for ~90 days.
 
@@ -376,7 +343,7 @@ mcp-scan run --probe
 
 **Fix:** Repeat Step 6 of this runbook for each environment that reported the error. The error message includes the environment ID and Dataverse host URL to help identify which environments need attention.
 
-### Surface 5b returns manifest_endpoint_unavailable
+### Teams App Catalog surface returns manifest_endpoint_unavailable
 
 **Symptom:** A scan discovers a declarative agent in the Teams catalog but the surface reports `manifest_endpoint_unavailable` with a Microsoft 400 BadRequest error citing "Resource not found for the segment 'manifest'".
 
@@ -386,7 +353,7 @@ mcp-scan run --probe
 
 ---
 
-## 8. Decommissioning the scanner
+## 7. Decommissioning the scanner
 
 To remove all scanner provisioning from the tenant, reverse the setup steps in approximately the same order. The scanner has no automated teardown tooling at this time.
 
@@ -403,11 +370,11 @@ After completing this checklist, the tenant has no remaining trace of the scanne
 
 ---
 
-## 9. Reference
+## 8. Reference
 
 ### Permission identifiers
 
-For audit or scripting purposes, the GUIDs for the eight Graph permissions used by the scanner are listed below.
+For audit purposes, the GUIDs for the eight Graph permissions used by the scanner are listed below.
 
 | Permission name | Type | GUID |
 |---|---|---|
@@ -438,7 +405,7 @@ Microsoft's documentation describes the Dataverse Web API base URL as `https://<
 
 When the scanner fetches the swagger definition for a custom connector, the URL returned by the Power Apps admin API in the `properties.apiDefinitions.originalSwaggerUrl` field is a SAS-signed Azure Blob Storage URL, not a Microsoft API endpoint. This is undocumented but consistent behavior. The scanner follows the URL verbatim; no special handling is required, but the egress requirement to `*.blob.core.windows.net` stems from this pattern.
 
-#### Surface 5a gate is Agent 365 licensing, not Frontier program
+#### Copilot admin catalog gate is Agent 365 licensing, not Frontier program
 
 Earlier Microsoft documentation suggested the Copilot Packages API was gated by the Frontier preview program. The actual 403 response from Microsoft cites Agent 365 licensing. Frontier and Agent 365 are related but distinct programs — Frontier is an invitation-based preview program; Agent 365 is a licensed product. The scanner labels this surface `tenant_not_eligible` to disambiguate from permission-consent errors.
 
@@ -448,7 +415,7 @@ Microsoft Graph's `/v1.0/appCatalogs/teamsApps/{id}/appDefinitions/{def-id}/mani
 
 ---
 
-## 10. Document control
+## 9. Document control
 
 Use this section to record completion of the setup for audit purposes.
 
