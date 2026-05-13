@@ -8,11 +8,10 @@ from pathlib import Path
 
 import typer
 
-from m365_mcp_scanner.auth import AppOnlyTokenProvider, DelegatedTokenProvider
+from m365_mcp_scanner.auth import DelegatedTokenProvider
+from m365_mcp_scanner.auth import doctor as doctor_module
 from m365_mcp_scanner.auth.msal_broker import AuthError
 from m365_mcp_scanner.clients.api_recorder import ApiCallRecorder
-from m365_mcp_scanner.clients.graph import GraphClient
-from m365_mcp_scanner.clients.power_platform_admin import PowerPlatformAdminClient
 from m365_mcp_scanner.config import Settings
 from m365_mcp_scanner.orchestrator import run_pipeline
 from m365_mcp_scanner.reporting import (
@@ -149,59 +148,38 @@ def doctor() -> None:
         except Exception as exc:  # noqa: BLE001
             err_console.print(f"[red]config load failed:[/] {exc}")
             return 1
-        try:
-            provider = AppOnlyTokenProvider(
-                tenant_id=settings.tenant_id,
-                client_id=settings.client_id,
-                client_secret=settings.client_secret.get_secret_value(),
-            )
-        except AuthError as exc:
-            err_console.print(f"[red]auth misconfigured:[/] {exc}")
+        results = await doctor_module.run_all(settings)
+        graph_r, pp_r, delegated_r = results
+
+        # Preserve legacy short-circuit output for the two graph-init failure modes.
+        if graph_r.detail.startswith("auth misconfigured: "):
+            rest = graph_r.detail[len("auth misconfigured: "):]
+            err_console.print(f"[red]auth misconfigured:[/] {rest}")
             return 1
-        async with GraphClient(provider) as graph:
-            try:
-                await provider.get_token()
-            except AuthError as exc:
-                err_console.print(f"[red]token mint failed:[/] {exc}")
-                return 1
-            ok_graph, msg_graph = await graph.doctor_ping()
+        if graph_r.detail.startswith("token mint failed: "):
+            rest = graph_r.detail[len("token mint failed: "):]
+            err_console.print(f"[red]token mint failed:[/] {rest}")
+            return 1
 
-        pp = PowerPlatformAdminClient(token_provider=provider)
-        try:
-            ok_pp, msg_pp = await pp.doctor_ping()
-        finally:
-            await pp.aclose()
-
-        if ok_graph:
-            err_console.print(f"[green]OK[/] Graph: {msg_graph}")
+        if graph_r.status == "pass":
+            err_console.print(f"[green]OK[/] Graph: {graph_r.detail}")
         else:
-            err_console.print(f"[red]FAIL[/] Graph: {msg_graph}")
-        if ok_pp:
-            err_console.print(f"[green]OK[/] {msg_pp}")
+            err_console.print(f"[red]FAIL[/] Graph: {graph_r.detail}")
+        if pp_r.status == "pass":
+            err_console.print(f"[green]OK[/] {pp_r.detail}")
         else:
-            err_console.print(f"[red]FAIL[/] {msg_pp}")
+            err_console.print(f"[red]FAIL[/] {pp_r.detail}")
 
         # Phase 3: delegated session is optional. Report status only.
-        try:
-            delegated = DelegatedTokenProvider(
-                tenant_id=settings.tenant_id, client_id=settings.client_id
-            )
-        except AuthError as exc:
+        if delegated_r.status == "pass":
             err_console.print(
-                f"[yellow]Delegated session:[/] not available ({exc})"
+                f"[green]OK[/] Delegated session: {delegated_r.detail}"
             )
         else:
-            if delegated.is_logged_in():
-                upn = delegated.account_username() or "(unknown user)"
-                err_console.print(
-                    f"[green]OK[/] Delegated session: {upn}"
-                )
-            else:
-                err_console.print(
-                    "[yellow]Delegated session:[/] not logged in "
-                    "(run `mcp-scan login` to enable Phase 3 surfaces)"
-                )
-        return 0 if (ok_graph and ok_pp) else 1
+            err_console.print(
+                f"[yellow]Delegated session:[/] {delegated_r.detail}"
+            )
+        return 0 if (graph_r.status == "pass" and pp_r.status == "pass") else 1
 
     raise typer.Exit(asyncio.run(_run()))
 
