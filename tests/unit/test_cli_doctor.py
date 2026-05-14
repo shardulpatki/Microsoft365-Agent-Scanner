@@ -33,7 +33,7 @@ def test_doctor_all_pass_logged_in_output() -> None:
     fake_delegated.account_username.return_value = "alice@example.com"
     with respx.mock(assert_all_called=False) as router:
         router.get(
-            "https://graph.microsoft.com/v1.0/external/connections"
+            "https://graph.microsoft.com/v1.0/applications"
         ).mock(return_value=httpx.Response(200, json={"value": [{}]}))
         router.get(
             "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments"
@@ -56,7 +56,7 @@ def test_doctor_pp_fail_output() -> None:
     fake_delegated.is_logged_in.return_value = False
     with respx.mock(assert_all_called=False) as router:
         router.get(
-            "https://graph.microsoft.com/v1.0/external/connections"
+            "https://graph.microsoft.com/v1.0/applications"
         ).mock(return_value=httpx.Response(200, json={"value": []}))
         router.get(
             "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments"

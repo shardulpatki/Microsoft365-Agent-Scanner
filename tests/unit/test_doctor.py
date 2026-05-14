@@ -49,7 +49,7 @@ def test_check_result_is_frozen() -> None:
 @pytest.mark.asyncio
 async def test_check_graph_pass() -> None:
     with respx.mock(base_url="https://graph.microsoft.com") as router:
-        router.get("/v1.0/external/connections").mock(
+        router.get("/v1.0/applications").mock(
             return_value=httpx.Response(200, json={"value": []})
         )
         with _patch_app_only_provider():
@@ -62,13 +62,26 @@ async def test_check_graph_pass() -> None:
 @pytest.mark.asyncio
 async def test_check_graph_fail_403() -> None:
     with respx.mock(base_url="https://graph.microsoft.com") as router:
-        router.get("/v1.0/external/connections").mock(
+        router.get("/v1.0/applications").mock(
             return_value=httpx.Response(403, text="forbidden")
         )
         with _patch_app_only_provider():
             result = await check_graph(_make_settings())
     assert result.status == "fail"
     assert "403" in result.detail
+
+
+@pytest.mark.asyncio
+async def test_check_graph_fail_403_hints_app_read() -> None:
+    with respx.mock(base_url="https://graph.microsoft.com") as router:
+        router.get("/v1.0/applications").mock(
+            return_value=httpx.Response(403, text="forbidden")
+        )
+        with _patch_app_only_provider():
+            result = await check_graph(_make_settings())
+    assert result.status == "fail"
+    assert "Application.Read.All" in result.detail
+    assert "tenant_id" not in result.detail
 
 
 @pytest.mark.asyncio
@@ -197,7 +210,7 @@ async def test_run_all_returns_three_results_in_order() -> None:
     fake_delegated.is_logged_in.return_value = False
     with respx.mock(assert_all_called=False) as router:
         router.get(
-            "https://graph.microsoft.com/v1.0/external/connections"
+            "https://graph.microsoft.com/v1.0/applications"
         ).mock(return_value=httpx.Response(200, json={"value": []}))
         router.get(
             "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments"

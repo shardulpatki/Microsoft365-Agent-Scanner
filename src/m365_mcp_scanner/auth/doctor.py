@@ -42,7 +42,7 @@ class CheckResult:
 
 
 async def check_graph(settings: Settings) -> CheckResult:
-    """Mint an app-only Graph token and ping ``/external/connections``."""
+    """Mint an app-only Graph token and ping ``/applications``."""
     try:
         provider = AppOnlyTokenProvider(
             tenant_id=settings.tenant_id,
