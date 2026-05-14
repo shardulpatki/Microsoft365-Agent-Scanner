@@ -15,6 +15,8 @@ class WizardState:
     az_logged_in: bool = False
     provisioned_at: Optional[datetime] = None
     target_env_id: Optional[str] = None
+    client_id: Optional[str] = None
+    app_object_id: Optional[str] = None
 
 
 @dataclass

@@ -180,11 +180,13 @@ chmod 600 ~/.m365-mcp-scanner/.setup-output.json
 
 `admin_consent_granted` is `false` when `az ad app permission admin-consent` failed and the operator must grant consent manually in the Entra portal; the wizard surfaces this as a blocking warning on Page 0 before allowing the user to advance to doctor checks. All other fields are required and non-empty.
 
-The wizard's Step 7 handles the Power Platform Management App registration as a guided manual step — operators run the PowerShell `Add-PowerAppsAccount` + `New-PowerAppManagementApp` cmdlets on their own shell, with deep links to install instructions and a Re-check button that calls a PP admin API to confirm registration succeeded. This mirrors the §5.3 Dataverse per-environment pattern: the wizard provides links and verification, but PowerShell-only operations stay on the operator's side rather than being shelled out from `setup-scanner.sh`.
+The wizard's Step 4 handles the Power Platform Management App registration as a guided manual step — operators run the PowerShell `Add-PowerAppsAccount` + `New-PowerAppManagementApp` cmdlets on their own shell, with deep links to install instructions and a Re-check button that calls a PP admin API to confirm registration succeeded. This mirrors the §5.3 Dataverse per-environment pattern: the wizard provides links and verification, but PowerShell-only operations stay on the operator's side rather than being shelled out from `setup-scanner.sh`.
 
 The wizard reads this file after the subprocess exits with code 0, then writes `~/.m365-mcp-scanner/config.toml`, then deletes `.setup-output.json`.
 
 Permissions: file is mode 600 throughout its brief existence; UI never displays secret in the browser.
+
+**Precedence note:** `config.toml` is read by `Settings` at a higher priority than any `.env` file in the working directory, but is overridden by `M365_MCP_*` environment variables. Operators with `M365_MCP_*` set in their shell will see the wizard's output ignored — this is intentional for CI/headless flows. See `docs/tenant-setup.md §5 — Configuration precedence`.
 
 ### 5.2 Streaming subprocess pattern
 
@@ -232,7 +234,7 @@ with st.status("Provisioning tenant...", expanded=True) as status:
     if rc == 0:
         _ingest_setup_output()
         status.update(label="Provisioned", state="complete")
-        st.session_state.wizard.step = 5
+        st.session_state.wizard.step = 4
     else:
         status.update(label=f"Failed (exit {rc})", state="error")
 ```
@@ -291,6 +293,8 @@ class WizardState:
     az_logged_in: bool = False
     provisioned_at: Optional[datetime] = None
     target_env_id: Optional[str] = None     # for "Fix this" jumps from Errors
+    client_id: Optional[str] = None         # captured from .setup-output.json
+    app_object_id: Optional[str] = None     # captured from .setup-output.json
 
 @dataclass
 class StatusCache:
@@ -323,7 +327,7 @@ Two mechanisms work; pick one and use it consistently:
 
 | Mechanism | Use case |
 |---|---|
-| `st.switch_page("pages/01_Status.py")` | Programmatic redirect (e.g., wizard finish → Run Scan) |
+| `st.switch_page("pages/01_Status.py")` | Programmatic redirect (e.g., wizard finish → Status) |
 | `st.page_link(...)` | User-driven navigation links |
 
 Don't use raw URL changes; they break Streamlit's session state continuity.

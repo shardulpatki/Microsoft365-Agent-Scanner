@@ -8,6 +8,7 @@ console-script.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from collections.abc import Iterator
@@ -22,8 +23,14 @@ def stream_subprocess(
     ``returncode`` is ``None`` while the process is still producing output and
     is set to the actual exit code on the final tuple.
     """
+    resolved = shutil.which(cmd[0])
+    if resolved is None:
+        raise FileNotFoundError(
+            f"{cmd[0]!r} not found on PATH. Install it or fix PATH and retry."
+        )
+    resolved_cmd = [resolved, *cmd[1:]]
     proc = subprocess.Popen(
-        cmd,
+        resolved_cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

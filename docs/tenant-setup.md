@@ -253,6 +253,18 @@ $env:M365_MCP_CLIENT_ID = "<your-app-id>"
 $env:M365_MCP_CLIENT_SECRET = "<your-secret>"
 ```
 
+### Configuration precedence
+
+When the same setting is provided by multiple sources, the scanner resolves it in this order (highest priority first):
+
+1. **Explicit init kwargs** — only used by tests and the setup wizard.
+2. **Environment variables** (`M365_MCP_*`) — preferred for CI and containers.
+3. **`~/.m365-mcp-scanner/config.toml`** — canonical operator config, written by the first-run wizard.
+4. **`.env` in the current working directory** — development convenience.
+5. **Built-in defaults**.
+
+Operators who export `M365_MCP_*` in their shell will see those values override anything the wizard writes to `config.toml`. That is intentional — environment variables stay highest-priority for CI/headless flows.
+
 ### Verify connectivity
 
 Before running a real scan, verify that the scanner can mint tokens for all three required audiences and reach each API surface:

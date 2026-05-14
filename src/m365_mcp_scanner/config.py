@@ -30,6 +30,24 @@ class TomlConfigSource(PydanticBaseSettingsSource):
 
 
 class Settings(BaseSettings):
+    """Scanner configuration.
+
+    Sources, in priority order (highest first):
+
+    1. Init kwargs — explicit values passed to ``Settings(...)``; used by
+       tests and the setup wizard.
+    2. Environment variables prefixed ``M365_MCP_`` — preferred for CI and
+       containerized usage.
+    3. ``~/.m365-mcp-scanner/config.toml`` — canonical operator-installed
+       config, written by the first-run wizard. Keys are bare lowercase
+       names at the root table (``tenant_id``, ``client_id``,
+       ``client_secret``) — no ``M365_MCP_`` prefix.
+    4. ``.env`` in the current working directory — development convenience;
+       intentionally below ``config.toml`` so a stale repo-root ``.env``
+       cannot override the wizard's output.
+    5. Built-in defaults.
+    """
+
     model_config = SettingsConfigDict(
         env_prefix="M365_MCP_",
         env_file=".env",
@@ -54,12 +72,13 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        # Priority: init (CLI overrides) > env > dotenv > toml > defaults.
+        # Priority: init (CLI overrides) > env > toml > dotenv > defaults.
+        # See class docstring for rationale.
         return (
             init_settings,
             env_settings,
-            dotenv_settings,
             TomlConfigSource(settings_cls),
+            dotenv_settings,
             file_secret_settings,
         )
 

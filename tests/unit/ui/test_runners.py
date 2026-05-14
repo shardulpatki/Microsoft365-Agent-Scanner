@@ -23,6 +23,7 @@ def test_stream_subprocess_yields_lines_then_returncode(
     from m365_mcp_scanner.ui import runners
 
     fake = _FakePopen(["alpha\n", "beta\r\n", "gamma"], returncode=0)
+    monkeypatch.setattr(runners.shutil, "which", lambda name: f"/fake/{name}")
     monkeypatch.setattr(runners.subprocess, "Popen", lambda *a, **kw: fake)
 
     output = list(runners.stream_subprocess(["does", "not", "matter"]))
@@ -37,10 +38,42 @@ def test_stream_subprocess_exit_codes(
     from m365_mcp_scanner.ui import runners
 
     fake = _FakePopen([], returncode=rc)
+    monkeypatch.setattr(runners.shutil, "which", lambda name: f"/fake/{name}")
     monkeypatch.setattr(runners.subprocess, "Popen", lambda *a, **kw: fake)
 
     output = list(runners.stream_subprocess(["x"]))
     assert output == [("", rc)]
+
+
+def test_stream_subprocess_raises_when_binary_missing(
+    fake_streamlit: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from m365_mcp_scanner.ui import runners
+
+    monkeypatch.setattr(runners.shutil, "which", lambda name: None)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        list(runners.stream_subprocess(["nonesuch", "--flag"]))
+    assert "nonesuch" in str(excinfo.value)
+
+
+def test_stream_subprocess_passes_resolved_path_to_popen(
+    fake_streamlit: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from m365_mcp_scanner.ui import runners
+
+    captured: dict[str, Any] = {}
+
+    def fake_popen(argv: list[str], *args: Any, **kwargs: Any) -> _FakePopen:
+        captured["argv"] = argv
+        return _FakePopen([], returncode=0)
+
+    monkeypatch.setattr(runners.shutil, "which", lambda name: "C:/fake/az.cmd")
+    monkeypatch.setattr(runners.subprocess, "Popen", fake_popen)
+
+    list(runners.stream_subprocess(["az", "login", "--use-device-code"]))
+    assert captured["argv"][0] == "C:/fake/az.cmd"
+    assert captured["argv"][1:] == ["login", "--use-device-code"]
 
 
 def test_run_scan_cmd_uses_sys_executable(fake_streamlit: types.ModuleType) -> None:

@@ -8,6 +8,7 @@ import streamlit as st
 from m365_mcp_scanner.ui.state import init_session_state
 
 CONFIG_PATH = Path.home() / ".m365-mcp-scanner" / "config.toml"
+WIZARD_DONE_MARKER = Path.home() / ".m365-mcp-scanner" / ".wizard-completed"
 
 
 @dataclass
@@ -33,7 +34,7 @@ def route_initial_landing() -> None:
         return
     st.session_state.initial_route_done = True
 
-    if not CONFIG_PATH.exists():
+    if not CONFIG_PATH.exists() or not WIZARD_DONE_MARKER.exists():
         st.switch_page("pages/00_First_Run_Setup.py")
 
     health = quick_health_check()

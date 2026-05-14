@@ -68,9 +68,10 @@ The operator installs the package, runs `mcp-scan ui`, and lands on the setup wi
 2. Sign in with Azure CLI (button shells `az login`)
 3. Confirm tenant ID and app name
 4. Provision tenant (button runs `setup-scanner.sh`, streams log)
-5. Verify (Graph + PP admin checks)
-6. Per-environment Dataverse provisioning (deep links + re-check)
-7. Finish → lands on Run Scan page
+5. Register as Power Platform Management App (guided PowerShell copy-paste; see ADR-0001)
+6. Verify (Graph + PP admin checks)
+7. Per-environment Dataverse provisioning (deep links + re-check)
+8. Finish → lands on Status (which has a one-click link to Run Scan)
 
 End state: a scan-ready tenant configuration with all six surfaces represented (three live, three correctly blocked with cited reasons).
 
@@ -86,7 +87,7 @@ Common scenarios the UI handles without sending the operator back to the runbook
 |---|---|
 | Delegated session expired | Status page shows "❌ not signed in"; Sign-in button renders device code in-app |
 | New Power Platform environment added since last scan | Errors page lists it under `no_dataverse_access`; "Fix this" jumps to wizard Step 6 for that env |
-| Secret expired | Status page shows expiry date; "Re-run setup" jumps wizard to Step 4 (new secret only) |
+| Secret expired | Status page shows expiry date; "Re-run setup" jumps wizard to Step 3 (new secret only) |
 | `tenant_not_eligible` (Surface 3 or 6a) | Shows Microsoft's verbatim 403 reason; no Fix button (this is licensing, not a config gap) |
 
 ---
@@ -101,13 +102,13 @@ Linear, step-gated via `st.session_state["wizard_step"]`. Operator cannot skip a
 
 | Step | Required behavior |
 |---|---|
-| 1. Prerequisites | Detect `az --version`; error with install link if missing or below 2.50 |
-| 2. Sign in | Shell `az login --tenant <id>`, stream stdout, advance on exit 0 |
-| 3. Confirm tenant + app name | Form with `az account show` tenant ID prefilled; app name defaults to "M365 MCP Scanner" |
-| 4. Provision | Shell `setup-scanner.sh`; stream log into `st.status`; on success, write `config.toml` with parsed client_id + secret |
-| 5. Verify | In-process doctor checks for Graph and PP admin audiences only |
+| 1. Prerequisites and Sign In | Detect `az --version` and `jq` with install links; shell `az login --use-device-code --allow-no-subscriptions` below, button disabled until prereqs green, advance on exit 0 |
+| 2. Confirm tenant + app name | Form with `az account show` tenant ID prefilled; app name defaults to "M365 MCP Scanner"; validate `^[A-Za-z0-9 _-]{1,64}$` |
+| 3. Provision | Shell `setup-scanner.sh`; stream log into `st.status`; on success, write `config.toml` with parsed client_id + secret |
+| 4. PP Management App | Display PowerShell copy-paste (`New-PowerAppManagementApp -ApplicationId <appId>`); Re-check button calls `doctor.check_power_platform` (see ADR-0001) |
+| 5. Verify | In-process doctor checks for Graph and PP admin audiences; per-env Dataverse status displayed (expected ❌ pre-Step 6) |
 | 6. Per-env Dataverse | One row per environment from PP admin enumeration. Each row: status, "Open in admin center" link, "Re-check" button |
-| 7. Finish | Persists `wizard_completed = true`; redirects to Run Scan |
+| 7. Finish | Persists `.wizard-completed` marker; redirects to Status (one click from Run Scan via the sidebar) |
 
 **Requirement: setup-scanner.sh must emit machine-readable client_id + client_secret** to a known path (e.g. `~/.m365-mcp-scanner/.setup-output.json`) for the wizard to parse. Updating the script is a prerequisite to this PRD shipping.
 
