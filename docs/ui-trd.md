@@ -171,11 +171,16 @@ cat > ~/.m365-mcp-scanner/.setup-output.json <<EOF
   "client_secret": "$SECRET_VALUE",
   "tenant_id": "$TENANT_ID",
   "app_object_id": "$APP_OBJECT_ID",
+  "admin_consent_granted": true,
   "completed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 EOF
 chmod 600 ~/.m365-mcp-scanner/.setup-output.json
 ```
+
+`admin_consent_granted` is `false` when `az ad app permission admin-consent` failed and the operator must grant consent manually in the Entra portal; the wizard surfaces this as a blocking warning on Page 0 before allowing the user to advance to doctor checks. All other fields are required and non-empty.
+
+The wizard's Step 7 handles the Power Platform Management App registration as a guided manual step — operators run the PowerShell `Add-PowerAppsAccount` + `New-PowerAppManagementApp` cmdlets on their own shell, with deep links to install instructions and a Re-check button that calls a PP admin API to confirm registration succeeded. This mirrors the §5.3 Dataverse per-environment pattern: the wizard provides links and verification, but PowerShell-only operations stay on the operator's side rather than being shelled out from `setup-scanner.sh`.
 
 The wizard reads this file after the subprocess exits with code 0, then writes `~/.m365-mcp-scanner/config.toml`, then deletes `.setup-output.json`.
 
@@ -254,6 +259,14 @@ def render(env: Environment) -> None:
 ```
 
 The `check_dataverse_access()` helper makes a single HEAD request against `/api/data/v9.2/bots?$top=1`. Returns True on 200, False on 401/403.
+
+### 5.4 Why Step 8 is not in the script
+
+An earlier iteration (Option A) added a Step 8 to `setup-scanner.sh` that shelled out to PowerShell to run `Add-PowerAppsAccount` + `New-PowerAppManagementApp` from inside bash. Real-tenant verification on Armor19 failed at this step with exit 127 because GNU `timeout` is not on PATH in Git Bash on Windows. That was the second cross-platform issue with the bash→pwsh handoff (the first was PATH discovery for `pwsh` itself across Git Bash, WSL, and POSIX shells).
+
+Rather than continue layering platform-specific shims, the PP Management App registration moves to the wizard's UI as a guided manual step — same pattern §5.3 already uses for per-environment Dataverse provisioning. PowerShell runs on the operator's shell where module availability and module install are obvious; the wizard provides the deep links, the exact command, and a Re-check button. The script no longer needs `pwsh` at all, and its JSON output is back to six fields with no platform-conditional bookkeeping.
+
+See `docs/decisions/0001-power-platform-management-app-in-wizard.md` for the rationale behind the wizard step rather than the script step.
 
 ---
 
