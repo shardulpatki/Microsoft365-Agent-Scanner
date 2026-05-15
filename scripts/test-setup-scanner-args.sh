@@ -8,6 +8,10 @@
 #
 # Does NOT exercise az / Graph: those are gated behind precondition checks
 # which run after arg parsing.
+#
+# Step 4 was collapsed from 8 `az ad app permission add` calls to a single
+# Graph PATCH on /applications/{id}. End-to-end validation of that change
+# requires a real tenant; see the manual VERIFY checklist in setup-scanner.sh.
 
 set -euo pipefail
 

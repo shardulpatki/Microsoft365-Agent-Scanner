@@ -37,6 +37,11 @@
 #      return 403 until the wizard's "Register as Power Platform
 #      Management App" step is completed by the operator (the script
 #      no longer performs this; see docs/ui-trd.md §5).
+#   6. Step 4 should complete in under 5 seconds (one Graph PATCH
+#      call). Earlier versions used 8 sequential `az ad app permission
+#      add` calls and could take 30+ seconds on Armor19; if Step 4 is
+#      noticeably slow now, the PATCH may have regressed to per-call
+#      behavior.
 #
 # Exit codes:
 #   0  success (Step 5 admin-consent may have fallen back to manual)
@@ -245,24 +250,31 @@ log_info "Service principal created. spObjectId=${SP_OBJECT_ID}"
 # Permission IDs sourced from docs/tenant-setup.md §8 (stable MS Graph IDs).
 # ---------------------------------------------------------------------------
 log_step '4/7' "Adding 5 application + 3 delegated Graph permissions..."
-for pid in "${APP_PERMS[@]}"; do
-    log_info "  + application permission ${pid}"
-    az ad app permission add \
-        --id "${APP_ID}" \
-        --api "${GRAPH_APP_ID}" \
-        --api-permissions "${pid}=Role" \
-        >/dev/null \
-        || { log_err "Failed to add application permission ${pid}."; exit 4; }
-done
-for pid in "${DEL_PERMS[@]}"; do
-    log_info "  + delegated permission ${pid}"
-    az ad app permission add \
-        --id "${APP_ID}" \
-        --api "${GRAPH_APP_ID}" \
-        --api-permissions "${pid}=Scope" \
-        >/dev/null \
-        || { log_err "Failed to add delegated permission ${pid}."; exit 4; }
-done
+log_info "  applying all 8 permissions in one Graph call..."
+APP_PERMS_JSON=$(printf '%s\n' "${APP_PERMS[@]}" | jq -R . | jq -s 'map({id: ., type: "Role"})')
+DEL_PERMS_JSON=$(printf '%s\n' "${DEL_PERMS[@]}" | jq -R . | jq -s 'map({id: ., type: "Scope"})')
+PATCH_BODY=$(jq -n \
+    --arg graph "${GRAPH_APP_ID}" \
+    --argjson app_perms "${APP_PERMS_JSON}" \
+    --argjson del_perms "${DEL_PERMS_JSON}" \
+    '{
+        requiredResourceAccess: [{
+            resourceAppId: $graph,
+            resourceAccess: ($app_perms + $del_perms)
+        }]
+     }')
+set +e
+PATCH_OUT=$(az rest --method PATCH \
+    --uri "https://graph.microsoft.com/v1.0/applications/${APP_OBJECT_ID}" \
+    --headers "Content-Type=application/json" \
+    --body "${PATCH_BODY}" 2>&1)
+PATCH_RC=$?
+set -e
+if [[ ${PATCH_RC} -ne 0 ]]; then
+    log_err "Failed to apply Graph permissions via PATCH."
+    printf '%s\n' "${PATCH_OUT}" | sed 's/^/        /' >&2
+    exit 4
+fi
 log_info "All 8 permissions queued (consent pending in next step)."
 
 # ---------------------------------------------------------------------------
