@@ -180,7 +180,7 @@ chmod 600 ~/.m365-mcp-scanner/.setup-output.json
 
 `admin_consent_granted` is `false` when `az ad app permission admin-consent` failed and the operator must grant consent manually in the Entra portal; the wizard surfaces this as a blocking warning on Page 0 before allowing the user to advance to doctor checks. All other fields are required and non-empty.
 
-The wizard's Step 4 handles the Power Platform Management App registration as a guided manual step — operators run the PowerShell `Add-PowerAppsAccount` + `New-PowerAppManagementApp` cmdlets on their own shell, with deep links to install instructions and a Re-check button that calls a PP admin API to confirm registration succeeded. This mirrors the §5.3 Dataverse per-environment pattern: the wizard provides links and verification, but PowerShell-only operations stay on the operator's side rather than being shelled out from `setup-scanner.sh`.
+The wizard's Step 4 handles the Power Platform Management App registration by shelling `pwsh` from Python via `wizard_logic.run_pp_management_registration` (which delegates to `runners.stream_subprocess`). Success is detected by `wizard_logic.verify_pp_registration_output`, which checks that stdout contains the `applicationId` column header and the exact appId on the header line or within two lines below it. On failure (non-zero exit, timeout, or unconfirmed output), a "Manual fallback" expander preserves the original copy-paste cmdlet flow with a Re-check button that calls `doctor.check_power_platform`. PowerShell stays out of `setup-scanner.sh`; pwsh enters only the Python-side wizard, where `shutil.which` + Python `Popen` avoid the bash→pwsh problems documented in §5.4.
 
 The wizard reads this file after the subprocess exits with code 0, then writes `~/.m365-mcp-scanner/config.toml`, then deletes `.setup-output.json`.
 
@@ -239,6 +239,16 @@ with st.status("Provisioning tenant...", expanded=True) as status:
         status.update(label=f"Failed (exit {rc})", state="error")
 ```
 
+### 5.2a Step 5 (Verify) scope
+
+Step 5 runs `doctor.run_all(settings)` only — that's exactly three
+`CheckResult`s: Graph, Power Platform admin, delegated session. It deliberately
+does **not** enumerate environments or call `check_dataverse` per env;
+per-environment Dataverse provisioning is Step 6's job, and rendering both
+would show the operator the same ❌ list twice. The Continue button is gated
+on Graph + PP admin passing; the delegated check is informational at this
+stage (login is optional unless the operator wants Phase 3 surfaces).
+
 ### 5.3 Per-environment Dataverse provisioning
 
 Manual + deep link, per the PRD decision. For each environment returned by the PP admin enumeration:
@@ -266,9 +276,23 @@ The `check_dataverse_access()` helper makes a single HEAD request against `/api/
 
 An earlier iteration (Option A) added a Step 8 to `setup-scanner.sh` that shelled out to PowerShell to run `Add-PowerAppsAccount` + `New-PowerAppManagementApp` from inside bash. Real-tenant verification on Armor19 failed at this step with exit 127 because GNU `timeout` is not on PATH in Git Bash on Windows. That was the second cross-platform issue with the bash→pwsh handoff (the first was PATH discovery for `pwsh` itself across Git Bash, WSL, and POSIX shells).
 
-Rather than continue layering platform-specific shims, the PP Management App registration moves to the wizard's UI as a guided manual step — same pattern §5.3 already uses for per-environment Dataverse provisioning. PowerShell runs on the operator's shell where module availability and module install are obvious; the wizard provides the deep links, the exact command, and a Re-check button. The script no longer needs `pwsh` at all, and its JSON output is back to six fields with no platform-conditional bookkeeping.
+The bash→pwsh handoff is still rejected: `setup-scanner.sh` stays bash-only with no pwsh dependency. But the wizard (Python parent) does shell `pwsh` directly — Python avoids the three failure modes that killed Option A: `shutil.which` resolves pwsh on PATH on Windows, the timeout is enforced by a Python watchdog thread (no GNU `timeout`), and a fresh `pwsh -NonInteractive` session loads `Microsoft.PowerApps.Administration.PowerShell` cleanly from cached state. `pwsh` is added as a Step 1 prerequisite so the failure surfaces early.
 
-See `docs/decisions/0001-power-platform-management-app-in-wizard.md` for the rationale behind the wizard step rather than the script step.
+If the automated pwsh path fails on a given machine, Step 4 falls back to the original guided manual flow — copy-paste cmdlets plus a Re-check button — preserved in a "Manual fallback" expander.
+
+See `docs/decisions/0001-power-platform-management-app-in-wizard.md` (including the 2026-05-15 update) for the full rationale.
+
+### 5.5 Step 2 prewarm of Add-PowerAppsAccount
+
+`Add-PowerAppsAccount` is the slow part of Step 4 — on first use it pops a browser sign-in and takes 20–60 seconds. The wizard front-runs it: when the operator clicks **Confirm and continue** on Step 2, a daemon thread spawned from the page module runs `pwsh -Command "Import-Module Microsoft.PowerApps.Administration.PowerShell; Add-PowerAppsAccount"` in the background. The wizard advances to Step 3 immediately; the operator sees the prewarm browser tab pop while reading the Step 3 provisioning panel.
+
+**Rendezvous via a status file, not session state.** Streamlit serializes `st.session_state` across reruns and `threading.Thread` is not serializable. The thread instead writes `~/.m365-mcp-scanner/.prewarm-status` (JSON: `{"status": "running" | "succeeded" | "failed", "completed_at": "..."}`). Step 4 polls this file via `wizard_logic.read_prewarm_status()` when its renderer runs.
+
+**Conditional pwsh command in Step 4.** If `read_prewarm_status() == "succeeded"`, Step 4 calls `run_pp_management_registration(client_id, skip_signin=True)` which omits `Add-PowerAppsAccount` from the inline script — registration runs against the cached session in ~5s. Any other status (`running`, `failed`, `not_started`) falls back to the full original sequence; the prewarm is best-effort.
+
+**Daemon thread.** The thread is started with `daemon=True` so it doesn't keep the Streamlit process alive on exit. The thread does not call any `st.*` functions (it's not on the Streamlit script-runner thread).
+
+**The second browser pop is intentional.** Step 2 shows a caption ("a second browser sign-in may appear shortly — that's the Power Platform session warming up") so operators aren't surprised. The cost of automation is two back-to-back sign-ins instead of one mid-wizard pause.
 
 ---
 
@@ -388,6 +412,26 @@ route_initial_landing()
 ```
 
 `quick_health_check()` runs lightweight checks (token acquisition only, no test API calls) so the initial landing is sub-second.
+
+### 7.1 Status page health refresh — dual-call pattern
+
+The "Re-run all checks" button on `pages/01_Status.py` makes two calls in
+sequence:
+
+1. `doctor_ui.full_health_check(settings)` — runs `doctor.run_all`, which
+   returns the three audience-level results (Graph, PP admin, delegated) and
+   populates the `HealthSummary` audience fields.
+2. `wizard_logic.list_environments_sync(settings)` then
+   `wizard_logic.check_all_envs_dataverse(settings, envs)` — concurrently
+   pings every environment's Dataverse Web API and writes the result map into
+   `summary.dataverse_envs`, which `render_status_panel` reads to draw the
+   per-environment rows.
+
+Per-env Dataverse is intentionally kept out of `doctor.run_all` because (a)
+the CLI `mcp-scan doctor` command would otherwise time-balloon on tenants
+with many environments, and (b) the wizard's Step 5 should not duplicate
+Step 6's per-env display. The Status page is the one surface that wants
+both, so it makes both calls explicitly.
 
 ---
 

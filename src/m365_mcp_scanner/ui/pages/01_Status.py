@@ -6,6 +6,7 @@ import streamlit as st
 
 from m365_mcp_scanner.auth.msal_broker import AuthError, DelegatedTokenProvider
 from m365_mcp_scanner.config import Settings
+from m365_mcp_scanner.ui import wizard_logic
 from m365_mcp_scanner.ui.components import render_status_panel
 from m365_mcp_scanner.ui.doctor_ui import HealthSummary, full_health_check
 from m365_mcp_scanner.ui.state import init_session_state
@@ -29,7 +30,24 @@ col_run, col_signout = st.columns([1, 1])
 if col_run.button("Re-run all checks"):
     with st.spinner("Running doctor checks…"):
         try:
-            st.session_state.status_summary = full_health_check(settings)
+            summary = full_health_check(settings)
+            try:
+                envs = wizard_logic.list_environments_sync(settings)
+            except Exception as env_exc:  # noqa: BLE001
+                st.warning(f"Could not enumerate environments: {env_exc}")
+                envs = []
+            if envs:
+                dv_results = asyncio.run(
+                    wizard_logic.check_all_envs_dataverse(settings, envs)
+                )
+                for env, result in zip(envs, dv_results):
+                    env_id = str(env.get("name", ""))
+                    passed = (
+                        not isinstance(result, BaseException)
+                        and result.status == "pass"
+                    )
+                    summary.dataverse_envs[env_id] = passed
+            st.session_state.status_summary = summary
         except Exception as exc:  # noqa: BLE001
             st.error(f"Doctor checks failed: {exc}")
 

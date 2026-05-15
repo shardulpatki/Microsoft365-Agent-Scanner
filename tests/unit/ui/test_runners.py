@@ -76,6 +76,50 @@ def test_stream_subprocess_passes_resolved_path_to_popen(
     assert captured["argv"][1:] == ["login", "--use-device-code"]
 
 
+def test_stream_subprocess_threads_env_to_popen(
+    fake_streamlit: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from m365_mcp_scanner.ui import runners
+
+    captured: dict[str, Any] = {}
+
+    def fake_popen(argv: list[str], *args: Any, **kwargs: Any) -> _FakePopen:
+        captured["env"] = kwargs.get("env")
+        return _FakePopen([], returncode=0)
+
+    monkeypatch.setattr(runners.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(runners.subprocess, "Popen", fake_popen)
+
+    list(
+        runners.stream_subprocess(
+            ["pwsh", "-Command", "echo hi"],
+            env={"MCP_APP_ID": "abc", "PATH": "/usr/bin"},
+        )
+    )
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["MCP_APP_ID"] == "abc"
+
+
+def test_stream_subprocess_default_call_passes_no_env(
+    fake_streamlit: types.ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Existing callers that omit env must continue to receive env=None."""
+    from m365_mcp_scanner.ui import runners
+
+    captured: dict[str, Any] = {}
+
+    def fake_popen(argv: list[str], *args: Any, **kwargs: Any) -> _FakePopen:
+        captured["env"] = kwargs.get("env", "MISSING")
+        return _FakePopen([], returncode=0)
+
+    monkeypatch.setattr(runners.shutil, "which", lambda name: f"/fake/{name}")
+    monkeypatch.setattr(runners.subprocess, "Popen", fake_popen)
+
+    list(runners.stream_subprocess(["x"]))
+    assert captured["env"] is None
+
+
 def test_run_scan_cmd_uses_sys_executable(fake_streamlit: types.ModuleType) -> None:
     from m365_mcp_scanner.ui.runners import run_scan_cmd
 

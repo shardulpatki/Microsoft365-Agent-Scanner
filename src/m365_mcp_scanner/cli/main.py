@@ -140,7 +140,11 @@ def logout() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Verify env-config + Graph reachability."""
+    """Verify Graph, Power Platform admin, and delegated session health.
+
+    For per-environment Dataverse status, run a scan or use the Status
+    page in the UI.
+    """
 
     async def _run() -> int:
         try:

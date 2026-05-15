@@ -22,8 +22,18 @@ def deep_link(env_id: str) -> str | None:
     return admin_center_deep_link(env_id)
 
 
-def render(env: dict[str, Any], settings: Settings) -> None:
-    """Render one environment row."""
+def render(
+    env: dict[str, Any],
+    settings: Settings,
+    *,
+    status_override: str | None = None,
+) -> Any:
+    """Render one environment row.
+
+    When ``status_override`` is provided, the status cell is rendered into an
+    :func:`st.empty` placeholder seeded with that text and returned, so the
+    caller can update it as an in-flight check resolves.
+    """
     env_id = str(env.get("name", ""))
     properties = env.get("properties") or {}
     display = properties.get("displayName") or env_id or "(unknown)"
@@ -41,7 +51,12 @@ def render(env: dict[str, Any], settings: Settings) -> None:
     cols = st.columns([3, 4, 1, 2, 2])
     cols[0].write(display)
     cols[1].code(instance_url, language="text")
-    cols[2].write(status_icon)
+    status_slot: Any = None
+    if status_override is not None:
+        status_slot = cols[2].empty()
+        status_slot.write(status_override)
+    else:
+        cols[2].write(status_icon)
 
     link = deep_link(env_id)
     if link is None:
@@ -53,3 +68,5 @@ def render(env: dict[str, Any], settings: Settings) -> None:
         result = asyncio.run(doctor.check_dataverse(settings, env))
         st.session_state.status.dataverse_envs[env_id] = result.status == "pass"
         st.rerun()
+
+    return status_slot

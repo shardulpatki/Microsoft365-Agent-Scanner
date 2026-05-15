@@ -63,3 +63,23 @@ PowerShell step, but the script itself stays bash-only and predictable.
 - The original Option A attempt was verified to fail at Step 8 with exit
   127 (`timeout` not found) on Git Bash 4.4.23 / Windows 11 / Azure CLI
   2.86.0 on 2026-05-13.
+
+## Update — 2026-05-15
+
+This decision was partially reversed. The wizard now automates
+the PowerShell registration via a pwsh subprocess shelled from
+Python (`ui/pages/00_First_Run_Setup.py`), not from
+`setup-scanner.sh`. The bash+pwsh handoff is still rejected for
+`setup-scanner.sh` per the original rationale, but Python+pwsh
+via `ui/runners.py`'s Windows-safe subprocess pattern works:
+`shutil.which` resolves pwsh on PATH, the timeout is enforced by
+a Python watchdog thread (no dependency on GNU `timeout`), and the
+PowerShell module loads cleanly from cached state in a fresh
+non-interactive session.
+
+`pwsh` is now a required prerequisite checked in Step 1 alongside
+Azure CLI and `jq`.
+
+The original copy-paste flow remains accessible as a "Manual
+fallback" expander on Step 4 in case the automated pwsh path
+fails on a given machine.

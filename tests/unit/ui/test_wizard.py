@@ -18,9 +18,14 @@ from m365_mcp_scanner.ui.wizard_logic import (
     detect_cli,
     ingest_setup_output,
     parse_az_version,
+    parse_step_marker,
+    prewarm_powerapps_account,
+    read_prewarm_status,
+    run_pp_management_registration,
     validate_app_name,
     validate_env_id,
     validate_tenant_id,
+    verify_pp_registration_output,
     write_config_toml,
 )
 
@@ -372,15 +377,32 @@ def test_ingest_setup_output_raises_on_malformed_json(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_errors_page_fix_button_targets_step_6() -> None:
-    """error_section._jump_to_wizard_env sets wizard.step = 6 (per-env Dataverse)."""
+def test_errors_page_fix_button_targets_step_6(fake_streamlit: "types.ModuleType") -> None:
+    """error_section._jump_to_wizard_env jumps to step 6 and clears the latch.
+
+    Reproduces the Fix-this re-entry bug: a stale ``step_6_started`` latch
+    would suppress the auto-trigger when the operator lands on Step 6.
+    """
     import inspect
 
     from m365_mcp_scanner.ui.components import error_section
+    from m365_mcp_scanner.ui.state import WizardState
 
     src = inspect.getsource(error_section._jump_to_wizard_env)
     assert "wizard.step = 6" in src
     assert "wizard.step = 7" not in src
+    assert "step_6_started = False" in src
+
+    fake_streamlit.switch_page = lambda *_a, **_kw: None  # type: ignore[attr-defined]
+    wizard = WizardState()
+    wizard.step_6_started = True
+    fake_streamlit.session_state.wizard = wizard
+
+    error_section._jump_to_wizard_env("env-123")
+
+    assert fake_streamlit.session_state.wizard.step == 6
+    assert fake_streamlit.session_state.wizard.step_6_started is False
+    assert fake_streamlit.session_state.wizard.target_env_id == "env-123"
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +435,142 @@ def test_render_step_1_advances_to_step_2_after_az_login() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# verify_pp_registration_output — Step 4 PowerShell success detection
+# ---------------------------------------------------------------------------
+
+
+def test_verify_pp_registration_success() -> None:
+    """Header with applicationId column + appId in data row within 2 lines → True."""
+    app_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    stdout = [
+        "",
+        "tenantId                             applicationId                        ",
+        "--------                             -------------                        ",
+        f"6cf34320-1234-5678-9abc-def012345678 {app_id}",
+        "",
+    ]
+    assert verify_pp_registration_output(stdout, app_id) is True
+
+
+def test_verify_pp_registration_missing_appid() -> None:
+    """Header present but row contains a different GUID → False (cmdlet ran on wrong app)."""
+    app_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    other = "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"
+    stdout = [
+        "tenantId                             applicationId",
+        "--------                             -------------",
+        f"6cf34320-1234-5678-9abc-def012345678 {other}",
+    ]
+    assert verify_pp_registration_output(stdout, app_id) is False
+
+
+def test_verify_pp_registration_no_table() -> None:
+    """Plain text with no header and no GUID → False."""
+    stdout = [
+        "Add-PowerAppsAccount : Sign-in cancelled.",
+        "At line:1 char:1",
+    ]
+    assert (
+        verify_pp_registration_output(
+            stdout, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+        is False
+    )
+
+
+def test_verify_pp_registration_empty_app_id_returns_false() -> None:
+    stdout = ["applicationId", "-------------", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]
+    assert verify_pp_registration_output(stdout, "") is False
+
+
+def test_run_pp_management_registration_passes_app_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The helper injects MCP_APP_ID env var and uses $env:MCP_APP_ID in pwsh."""
+    captured: dict[str, object] = {}
+
+    def fake_stream(
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+    ) -> object:
+        captured["cmd"] = cmd
+        captured["env"] = env
+        captured["timeout_s"] = timeout_s
+
+        def _gen() -> object:
+            yield ("hello", None)
+            yield ("", 0)
+
+        return _gen()
+
+    monkeypatch.setattr(wizard_logic, "stream_subprocess", fake_stream)
+
+    app_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    list(run_pp_management_registration(app_id))
+
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["MCP_APP_ID"] == app_id
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert cmd[0] == "pwsh"
+    assert "-NoProfile" in cmd
+    assert "-NonInteractive" in cmd
+    script = cmd[-1]
+    assert isinstance(script, str)
+    assert "$env:MCP_APP_ID" in script
+    assert "New-PowerAppManagementApp" in script
+    # Guard against accidental interpolation: the literal appId must not
+    # appear in the script string itself.
+    assert app_id not in script
+
+    assert captured["timeout_s"] == 300
+
+
+def test_pwsh_added_to_step_1_prereqs() -> None:
+    """Step 1 source includes pwsh detect_cli and all_prereqs_ok gates on it."""
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_1(")
+    end = src.index("def _render_step_2(")
+    body = src[start:end]
+    assert 'detect_cli("pwsh")' in body
+    assert "PowerShell 7+" in body
+    assert "pwsh.status ==" in body
+
+
+def test_render_step_4_uses_pwsh_subprocess_and_fallback() -> None:
+    """Step 4 source calls run_pp_management_registration and exposes the Manual fallback."""
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_4(")
+    end = src.index("def _render_step_5(")
+    body = src[start:end]
+    assert "wizard_logic.run_pp_management_registration" in body
+    assert "wizard_logic.verify_pp_registration_output" in body
+    assert "_render_step_4_manual_fallback" in body
+    assert "Manual fallback" in src  # rendered inside helper below step 4
+
+
 def test_render_step_7_finish_routes_to_status() -> None:
     """The Finish step's primary button routes to Status, not Run Scan."""
     page = (
@@ -431,3 +589,443 @@ def test_render_step_7_finish_routes_to_status() -> None:
     assert 'st.switch_page("pages/02_Run_Scan.py")' not in body
     assert '"Continue to Status"' in body
     assert '"Continue to Run Scan"' not in body
+
+
+# ---------------------------------------------------------------------------
+# Change 1 — Step 2 auto-confirm flow
+# ---------------------------------------------------------------------------
+
+
+def _step_2_source() -> str:
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_2(")
+    end = src.index("def _render_step_3(")
+    return src[start:end]
+
+
+def _step_3_source() -> str:
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_3(")
+    end = src.index("def _render_step_4(")
+    return src[start:end]
+
+
+def _step_4_source() -> str:
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_4(")
+    end = src.index("def _render_step_4_manual_fallback(")
+    return src[start:end]
+
+
+def test_step_2_confirm_advances_with_defaults() -> None:
+    body = _step_2_source()
+    assert '"Confirm and continue"' in body
+    assert "type=\"primary\"" in body
+    assert "step_2_editing" in body
+    assert "_kick_off_prewarm()" in body
+    assert "_advance(3)" in body
+
+
+def test_step_2_edit_toggle_renders_form() -> None:
+    body = _step_2_source()
+    assert "wizard.step_2_editing = True" in body
+    assert 'st.form("step2_form")' in body
+    assert "if not wizard.step_2_editing:" in body
+
+
+def test_step_2_edit_then_confirm_uses_edited_values() -> None:
+    body = _step_2_source()
+    edit_path_start = body.index('st.form("step2_form")')
+    edit_body = body[edit_path_start:]
+    assert "validate_tenant_id(tenant_id)" in edit_body
+    assert "validate_app_name(app_name)" in edit_body
+    assert "wizard.tenant_id = tenant_id" in edit_body
+    assert "wizard.app_name = app_name" in edit_body
+    assert "_advance(3)" in edit_body
+
+
+def test_step_2_caption_mentions_second_browser_signin() -> None:
+    body = _step_2_source()
+    assert "second browser sign-in" in body
+
+
+# ---------------------------------------------------------------------------
+# Change 2 — parse_step_marker + Step 3 progress bar
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "line,expected",
+    [
+        ("[1/7] Resolving tenant…", 1),
+        ("[3/7] Creating service principal", 3),
+        ("[7/7] Done", 7),
+        ("prefix [4/7] suffix", 4),
+    ],
+)
+def test_parse_step_marker_extracts_n(line: str, expected: int) -> None:
+    assert parse_step_marker(line) == expected
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["", "some log line", "[abc/7]", "[1/8] wrong denominator", "7/7"],
+)
+def test_parse_step_marker_returns_none_on_unrelated_lines(line: str) -> None:
+    assert parse_step_marker(line) is None
+
+
+def test_parse_step_marker_caps_at_seven() -> None:
+    assert parse_step_marker("[12/7] runaway") == 7
+    assert parse_step_marker("[0/7] start") == 0
+
+
+def test_render_step_3_uses_progress_bar() -> None:
+    body = _step_3_source()
+    assert 'Provision tenant (~2-3 min)' in body
+    assert "st.progress(" in body
+    assert "wizard_logic.parse_step_marker" in body
+    assert 'st.expander("Detailed output"' in body
+
+
+# ---------------------------------------------------------------------------
+# Change 3 — prewarm Add-PowerAppsAccount
+# ---------------------------------------------------------------------------
+
+
+def _fake_stream_factory(yields: list[tuple[str, int | None]]):
+    def fake_stream(
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+    ):
+        for item in yields:
+            yield item
+
+    return fake_stream
+
+
+def test_prewarm_writes_status_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        wizard_logic,
+        "stream_subprocess",
+        _fake_stream_factory([("hello", None), ("", 0)]),
+    )
+    status_path = tmp_path / ".prewarm-status"
+    list(prewarm_powerapps_account(status_path=status_path))
+    data = json.loads(status_path.read_text(encoding="utf-8"))
+    assert data["status"] == "succeeded"
+    assert "completed_at" in data
+
+
+def test_prewarm_writes_failed_status_on_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        wizard_logic,
+        "stream_subprocess",
+        _fake_stream_factory([("err", None), ("", 2)]),
+    )
+    status_path = tmp_path / ".prewarm-status"
+    list(prewarm_powerapps_account(status_path=status_path))
+    data = json.loads(status_path.read_text(encoding="utf-8"))
+    assert data["status"] == "failed"
+
+
+def test_prewarm_writes_failed_status_on_missing_pwsh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def raising(*_a: object, **_kw: object):
+        raise FileNotFoundError("pwsh not on PATH")
+        yield  # pragma: no cover — make this a generator
+
+    monkeypatch.setattr(wizard_logic, "stream_subprocess", raising)
+    status_path = tmp_path / ".prewarm-status"
+    list(prewarm_powerapps_account(status_path=status_path))
+    data = json.loads(status_path.read_text(encoding="utf-8"))
+    assert data["status"] == "failed"
+
+
+def test_read_prewarm_status_returns_not_started_for_missing_file(
+    tmp_path: Path,
+) -> None:
+    assert read_prewarm_status(tmp_path / "does-not-exist") == "not_started"
+
+
+def test_read_prewarm_status_returns_not_started_for_malformed_file(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / ".prewarm-status"
+    p.write_text("not json", encoding="utf-8")
+    assert read_prewarm_status(p) == "not_started"
+
+
+def test_step_4_command_skips_signin_when_prewarm_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_stream(
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+    ):
+        captured["cmd"] = cmd
+
+        def _gen():
+            yield ("ok", None)
+            yield ("", 0)
+
+        return _gen()
+
+    monkeypatch.setattr(wizard_logic, "stream_subprocess", fake_stream)
+    list(
+        run_pp_management_registration(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", skip_signin=True
+        )
+    )
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    script = cmd[-1]
+    assert isinstance(script, str)
+    assert "Add-PowerAppsAccount" not in script
+    assert "New-PowerAppManagementApp" in script
+
+
+def test_step_4_command_includes_signin_when_prewarm_not_succeeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_stream(
+        cmd: list[str],
+        cwd: Path | None = None,
+        *,
+        env: dict[str, str] | None = None,
+        timeout_s: float | None = None,
+    ):
+        captured["cmd"] = cmd
+
+        def _gen():
+            yield ("ok", None)
+            yield ("", 0)
+
+        return _gen()
+
+    monkeypatch.setattr(wizard_logic, "stream_subprocess", fake_stream)
+    list(
+        run_pp_management_registration(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        )
+    )
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    script = cmd[-1]
+    assert isinstance(script, str)
+    assert "Add-PowerAppsAccount" in script
+    assert "New-PowerAppManagementApp" in script
+
+
+def test_render_step_4_branches_on_prewarm_status() -> None:
+    body = _step_4_source()
+    assert "wizard_logic.read_prewarm_status" in body
+    assert "skip_signin=skip_signin" in body
+
+
+def _step_6_source() -> str:
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_6(")
+    end = src.index("def _render_step_7(")
+    return src[start:end]
+
+
+def test_step_4_auto_starts_on_landing() -> None:
+    body = _step_4_source()
+    # Old button gate is gone — no more "Run PowerShell registration" click.
+    assert (
+        'st.button(\n        "Run PowerShell registration' not in body
+    )
+    assert '"Run PowerShell registration' not in body
+    # Fire-once latch is in place and triggers the registration call.
+    assert "wizard.step_4_started" in body
+    assert "if not wizard.step_4_started:" in body
+    assert "wizard.step_4_started = True" in body
+    assert "_run_step_4_registration(" in body
+
+
+def test_step_4_does_not_double_trigger() -> None:
+    body = _step_4_source()
+    # The trigger call must be guarded by the latch: the call to
+    # _run_step_4_registration appears inside the `if not wizard.step_4_started:`
+    # branch, never at the top level of the renderer.
+    guard_idx = body.index("if not wizard.step_4_started:")
+    trigger_idx = body.index("_run_step_4_registration(")
+    assert guard_idx < trigger_idx, (
+        "_run_step_4_registration must be invoked only after the latch check"
+    )
+    # The latch is flipped to True before invoking the subprocess, ensuring
+    # subsequent reruns skip the trigger.
+    latch_set_idx = body.index("wizard.step_4_started = True")
+    assert guard_idx < latch_set_idx < trigger_idx
+    # Retry path resets the latch via st.rerun, not by re-calling the trigger
+    # synchronously.
+    assert 'st.button("Retry"' in body
+    assert "wizard.step_4_started = False" in body
+
+
+def test_step_6_auto_starts_on_landing() -> None:
+    body = _step_6_source()
+    assert "wizard.step_6_started" in body
+    assert "if not wizard.step_6_started:" in body
+    assert "wizard.step_6_started = True" in body
+    assert 'status_override="Checking…"' in body
+    # Concurrent fan-out via wizard_logic.check_all_envs_dataverse — no more
+    # sequential asyncio.run inside the per-env loop.
+    assert "wizard_logic.check_all_envs_dataverse(settings, envs)" in body
+    assert "asyncio.run(doctor.check_dataverse(settings, env))" not in body
+    # No explicit button gate before the auto-check loop.
+    assert '"Check Dataverse"' not in body
+
+
+def test_step_6_continue_available_during_check() -> None:
+    body = _step_6_source()
+    continue_idx = body.index('st.button("Continue", type="primary"):')
+    guard_idx = body.index("if not wizard.step_6_started:")
+    # Continue button is rendered AFTER the in-flight check block, at the
+    # function's top level — never inside the latched branch.
+    assert continue_idx > guard_idx
+    # The Continue button has no `disabled=` argument anywhere on its line.
+    continue_line = body[continue_idx : body.index("\n", continue_idx)]
+    assert "disabled" not in continue_line
+
+
+# ---------------------------------------------------------------------------
+# check_all_envs_dataverse — Step 6 concurrent fan-out
+# ---------------------------------------------------------------------------
+
+
+def _make_env(name: str) -> dict[str, Any]:
+    return {"name": name, "properties": {"displayName": name}}
+
+
+def _check_result(name: str, status: str = "pass") -> object:
+    from m365_mcp_scanner.auth.doctor import CheckResult
+
+    return CheckResult(
+        name=name, audience="dataverse", status=status, detail=name
+    )
+
+
+def test_check_all_envs_dataverse_calls_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import time
+    from typing import Any as _Any
+
+    async def slow_check(
+        _settings: _Any, env: dict[str, _Any]
+    ) -> object:
+        await asyncio.sleep(0.5)
+        return _check_result(str(env["name"]))
+
+    monkeypatch.setattr(wizard_logic.doctor, "check_dataverse", slow_check)
+
+    envs = [_make_env("a"), _make_env("b"), _make_env("c")]
+    start = time.perf_counter()
+    results = asyncio.run(
+        wizard_logic.check_all_envs_dataverse(object(), envs)
+    )
+    elapsed = time.perf_counter() - start
+
+    assert len(results) == 3
+    # Sequential would be ~1.5s; concurrent should be well under 1.0s.
+    assert elapsed < 1.0, f"expected concurrent fan-out, took {elapsed:.2f}s"
+
+
+def test_check_all_envs_dataverse_preserves_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from typing import Any as _Any
+
+    async def echo_check(
+        _settings: _Any, env: dict[str, _Any]
+    ) -> object:
+        # Sleep durations vary by env name so completion order would differ
+        # from input order if gather did not preserve it.
+        delays = {"a": 0.05, "b": 0.01, "c": 0.03}
+        await asyncio.sleep(delays[str(env["name"])])
+        return _check_result(str(env["name"]))
+
+    monkeypatch.setattr(wizard_logic.doctor, "check_dataverse", echo_check)
+
+    envs = [_make_env("a"), _make_env("b"), _make_env("c")]
+    results = asyncio.run(
+        wizard_logic.check_all_envs_dataverse(object(), envs)
+    )
+
+    assert [r.detail for r in results] == ["a", "b", "c"]
+
+
+def test_check_all_envs_dataverse_propagates_individual_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    from typing import Any as _Any
+
+    async def mixed_check(
+        _settings: _Any, env: dict[str, _Any]
+    ) -> object:
+        name = str(env["name"])
+        if name == "b":
+            return _check_result(name, status="fail")
+        return _check_result(name, status="pass")
+
+    monkeypatch.setattr(wizard_logic.doctor, "check_dataverse", mixed_check)
+
+    envs = [_make_env("a"), _make_env("b"), _make_env("c")]
+    results = asyncio.run(
+        wizard_logic.check_all_envs_dataverse(object(), envs)
+    )
+
+    assert [r.status for r in results] == ["pass", "fail", "pass"]
+    assert [r.name for r in results] == ["a", "b", "c"]

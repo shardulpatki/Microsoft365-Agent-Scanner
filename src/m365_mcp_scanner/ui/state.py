@@ -17,6 +17,9 @@ class WizardState:
     target_env_id: Optional[str] = None
     client_id: Optional[str] = None
     app_object_id: Optional[str] = None
+    step_2_editing: bool = False
+    step_4_started: bool = False
+    step_6_started: bool = False
 
 
 @dataclass

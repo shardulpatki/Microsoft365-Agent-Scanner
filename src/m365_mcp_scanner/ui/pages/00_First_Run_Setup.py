@@ -21,25 +21,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
 
+logger = logging.getLogger(__name__)
+
 from m365_mcp_scanner.auth import doctor
-from m365_mcp_scanner.auth.msal_broker import AppOnlyTokenProvider
-from m365_mcp_scanner.clients.power_platform_admin import PowerPlatformAdminClient
 from m365_mcp_scanner.config import Settings
 from m365_mcp_scanner.ui.components import env_row
 from m365_mcp_scanner.ui.runners import stream_subprocess
 from m365_mcp_scanner.ui.state import init_session_state
+from m365_mcp_scanner.ui import wizard_logic
 from m365_mcp_scanner.ui.wizard_logic import (
     MIN_AZ_VERSION,
     az_account_tenant,
     detect_cli,
     ingest_setup_output,
+    list_environments_sync,
     parse_az_version,
     validate_app_name,
     validate_tenant_id,
@@ -53,6 +58,7 @@ WIZARD_DONE_MARKER = DATA_DIR / ".wizard-completed"
 _LOG_KEYS = {
     "az_login": "_wizard_az_login_log",
     "provision": "_wizard_provision_log",
+    "pp_register": "_wizard_pp_register_log",
 }
 
 
@@ -69,30 +75,18 @@ def setup_scanner_script_path() -> Path:
 # ---------------------------------------------------------------------------
 
 
-async def _collect_envs(settings: Settings) -> list[dict[str, Any]]:
-    provider = AppOnlyTokenProvider(
-        tenant_id=settings.tenant_id,
-        client_id=settings.client_id,
-        client_secret=settings.client_secret.get_secret_value(),
-    )
-    pp = PowerPlatformAdminClient(token_provider=provider)
-    try:
-        return [e async for e in pp.list_environments()]
-    finally:
-        await pp.aclose()
-
-
-def list_environments_sync(settings: Settings) -> list[dict[str, Any]]:
-    return asyncio.run(_collect_envs(settings))
-
-
 # ---------------------------------------------------------------------------
 # Step renderers
 # ---------------------------------------------------------------------------
 
 
 def _advance(step: int) -> None:
-    st.session_state.wizard.step = step
+    wizard = st.session_state.wizard
+    if step == 4:
+        wizard.step_4_started = False
+    if step == 6:
+        wizard.step_6_started = False
+    wizard.step = step
     st.rerun()
 
 
@@ -110,8 +104,9 @@ def _render_step_1() -> None:
 
     st.subheader("Prerequisites")
     st.write(
-        "Verifying that Azure CLI and `jq` are installed. These are required "
-        "by the provisioning script."
+        "Verifying that Azure CLI, `jq`, and PowerShell 7+ (`pwsh`) are "
+        "installed. Azure CLI and jq drive the provisioning script; pwsh "
+        "runs the Power Platform Management App registration in Step 4."
     )
 
     az = detect_cli("az")
@@ -149,7 +144,23 @@ def _render_step_1() -> None:
     else:
         st.error(jq.error or "jq failed to run.")
 
-    all_prereqs_ok = az.status == "ok" and az_ver_ok and jq.status == "ok"
+    pwsh = detect_cli("pwsh")
+    if pwsh.status == "ok":
+        st.success("PowerShell 7+ (pwsh) detected")
+    elif pwsh.status == "not_on_path":
+        st.error(
+            "pwsh not found on PATH. Install PowerShell 7+: "
+            "<https://learn.microsoft.com/powershell/scripting/install/installing-powershell>"
+        )
+    else:
+        st.error(pwsh.error or "pwsh failed to run.")
+
+    all_prereqs_ok = (
+        az.status == "ok"
+        and az_ver_ok
+        and jq.status == "ok"
+        and pwsh.status == "ok"
+    )
 
     st.divider()
 
@@ -175,6 +186,7 @@ def _render_step_1() -> None:
     if start:
         lines: list[str] = []
         rc: int | None = None
+        t_login_start = time.monotonic()
         try:
             for line, code in stream_subprocess(
                 ["az", "login", "--use-device-code", "--allow-no-subscriptions"]
@@ -188,9 +200,19 @@ def _render_step_1() -> None:
         except FileNotFoundError as exc:
             st.error(str(exc))
             return
+        print(
+            f"az login completed in {time.monotonic() - t_login_start:.2f}s (rc={rc})",
+            flush=True,
+        )
         st.session_state[_LOG_KEYS["az_login"]] = lines
         if rc == 0:
+            t_show = time.monotonic()
             tenant = az_account_tenant()
+            print(
+                f"az account show completed in {time.monotonic() - t_show:.2f}s "
+                f"(tenant_resolved={tenant is not None})",
+                flush=True,
+            )
             if tenant is None:
                 st.error(
                     "`az login` succeeded but `az account show` returned no "
@@ -205,28 +227,83 @@ def _render_step_1() -> None:
             st.error(f"`az login` failed with exit code {rc}.")
 
 
+def _kick_off_prewarm() -> None:
+    """Spawn a daemon thread that runs Add-PowerAppsAccount in the background.
+
+    The thread discards subprocess output (it is not on the Streamlit thread
+    and must not touch ``st.*``). Status is communicated via the on-disk
+    prewarm status file that ``wizard_logic.prewarm_powerapps_account``
+    writes.
+    """
+    def _run() -> None:
+        try:
+            for _line, _code in wizard_logic.prewarm_powerapps_account():
+                pass
+        except Exception:  # noqa: BLE001 — best-effort warm-up
+            pass
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
 def _render_step_2() -> None:
     st.header("Step 2 of 7 — Confirm tenant + app name")
-    st.write(
-        "Confirm the tenant where the scanner app will be created and choose "
-        "a display name for the Entra app registration."
-    )
+    wizard = st.session_state.wizard
+    default_tenant = wizard.tenant_id or ""
+    default_app_name = wizard.app_name
+
+    if not wizard.step_2_editing:
+        st.write(
+            "These values came from `az account show` and the wizard "
+            "default. Click **Confirm and continue** to use them as-is, "
+            "or **Edit** to change either field."
+        )
+        st.markdown("**Tenant ID**")
+        st.code(default_tenant, language="text")
+        st.markdown("**App display name**")
+        st.code(default_app_name, language="text")
+
+        col_a, col_b = st.columns([1, 1])
+        confirm = col_a.button("Confirm and continue", type="primary")
+        edit = col_b.button("Edit")
+        st.caption(
+            "Tip: A second browser sign-in may appear shortly — that's "
+            "the Power Platform session warming up. You can complete it "
+            "any time before Step 4."
+        )
+
+        if confirm:
+            if not validate_tenant_id(default_tenant):
+                st.error(
+                    "Tenant ID from `az account show` is not a valid "
+                    "GUID. Click **Edit** to enter it manually."
+                )
+                return
+            wizard.tenant_id = default_tenant
+            wizard.app_name = default_app_name
+            wizard.step_2_editing = False
+            _kick_off_prewarm()
+            _advance(3)
+        if edit:
+            wizard.step_2_editing = True
+            st.rerun()
+        return
 
     with st.form("step2_form"):
         tenant_id = st.text_input(
             "Tenant ID",
-            value=st.session_state.wizard.tenant_id or "",
+            value=default_tenant,
             help="GUID, copied from `az account show`.",
         )
         app_name = st.text_input(
             "App display name",
-            value=st.session_state.wizard.app_name,
+            value=default_app_name,
             help=(
                 "Must match ^[A-Za-z0-9 _-]{1,64}$ "
                 "(no shell metacharacters)."
             ),
         )
-        submitted = st.form_submit_button("Continue")
+        submitted = st.form_submit_button("Confirm and continue")
 
     if submitted:
         if not validate_tenant_id(tenant_id):
@@ -238,8 +315,10 @@ def _render_step_2() -> None:
                 "underscores, or hyphens."
             )
             return
-        st.session_state.wizard.tenant_id = tenant_id
-        st.session_state.wizard.app_name = app_name
+        wizard.tenant_id = tenant_id
+        wizard.app_name = app_name
+        wizard.step_2_editing = False
+        _kick_off_prewarm()
         _advance(3)
 
 
@@ -248,9 +327,9 @@ def _render_step_3() -> None:
     wizard = st.session_state.wizard
     st.write(
         f"This runs `scripts/setup-scanner.sh` against tenant "
-        f"`{wizard.tenant_id}`. Takes ~50 seconds. It creates the Entra app, "
-        "service principal, secret, permissions, admin consent, and Power "
-        "Platform Administrator role."
+        f"`{wizard.tenant_id}`. Takes ~2-3 minutes. It creates the Entra "
+        "app, service principal, secret, permissions, admin consent, and "
+        "Power Platform Administrator role."
     )
 
     script = setup_scanner_script_path()
@@ -258,9 +337,7 @@ def _render_step_3() -> None:
         st.error(f"setup-scanner.sh not found at {script}.")
         return
 
-    log_area = st.empty()
-
-    if st.button("Provision tenant (~50s)", type="primary"):
+    if st.button("Provision tenant (~2-3 min)", type="primary"):
         if not (
             validate_tenant_id(wizard.tenant_id or "")
             and validate_app_name(wizard.app_name)
@@ -273,6 +350,9 @@ def _render_step_3() -> None:
         lines: list[str] = []
         rc: int | None = None
         with st.status("Provisioning…", expanded=True):
+            progress = st.progress(0.0, text="Starting…")
+            with st.expander("Detailed output", expanded=False):
+                log_area = st.empty()
             try:
                 for line, code in stream_subprocess(
                     [
@@ -288,11 +368,18 @@ def _render_step_3() -> None:
                             log_area.code(
                                 "\n".join(lines[-30:]), language="text"
                             )
+                            marker = wizard_logic.parse_step_marker(line)
+                            if marker is not None:
+                                progress.progress(
+                                    marker / 7, text=line.strip()
+                                )
                     else:
                         rc = code
             except FileNotFoundError as exc:
                 st.error(str(exc))
                 return
+            if rc == 0:
+                progress.progress(1.0, text="Provisioned.")
 
         st.session_state[_LOG_KEYS["provision"]] = lines
         if rc == 0:
@@ -318,15 +405,12 @@ def _render_step_3() -> None:
 
 
 def _render_step_4() -> None:
-    st.header(
-        "Step 4 of 7 — Register as Power Platform Management App "
-        "(one manual step)"
-    )
+    st.header("Step 4 of 7 — Register as Power Platform Management App")
     st.write(
         "Power Platform requires a separate registration before service "
-        "principals can call its admin API. This is a PowerShell-only cmdlet "
-        "from Microsoft. Run the commands below in a PowerShell window, then "
-        "click Re-check. See ADR-0001 "
+        "principals can call its admin API. The wizard runs the PowerShell "
+        "cmdlet for you. The first run prompts for a browser sign-in to "
+        "`Add-PowerAppsAccount`. See ADR-0001 "
         "(`docs/decisions/0001-power-platform-management-app-in-wizard.md`) "
         "for the rationale."
     )
@@ -335,41 +419,117 @@ def _render_step_4() -> None:
     st.subheader("App (client) ID")
     st.code(client_id, language="text")
 
-    st.subheader("Commands to run in PowerShell")
-    commands = (
-        "Install-Module -Name Microsoft.PowerApps.Administration.PowerShell "
-        "-Force -AllowClobber -Scope CurrentUser\n"
-        "Add-PowerAppsAccount\n"
-        f"New-PowerAppManagementApp -ApplicationId {client_id}"
-    )
-    st.code(commands, language="powershell")
+    log_area = st.empty()
 
-    st.info(
-        "Note: `New-PowerAppManagementApp` may take 30–60 seconds to "
-        "propagate after the cmdlet completes. If the first Re-check fails, "
-        "wait and try again."
-    )
+    prewarm_status = wizard_logic.read_prewarm_status()
+    print(f"step 4 entered; prewarm status: {prewarm_status}", flush=True)
+    skip_signin = prewarm_status == "succeeded"
+    if skip_signin:
+        st.caption(
+            "Power Platform sign-in was warmed up during Step 2 — this "
+            "should complete in ~5 seconds with no second browser pop."
+        )
 
-    if st.button("Re-check", type="primary"):
+    _render_step_4_manual_fallback(client_id)
+
+    wizard = st.session_state.wizard
+    if not wizard.step_4_started:
+        wizard.step_4_started = True
+        _run_step_4_registration(client_id, log_area, skip_signin=skip_signin)
+    else:
+        if st.button("Retry", type="primary", key="step4_retry"):
+            wizard.step_4_started = False
+            st.rerun()
+
+
+def _run_step_4_registration(
+    client_id: str,
+    log_area: Any,
+    *,
+    skip_signin: bool,
+) -> None:
+    lines: list[str] = []
+    rc: int | None = None
+    with st.status(
+        "Registering with Power Platform…",
+        state="running",
+        expanded=True,
+    ) as status:
         try:
-            settings = Settings()
-            result = asyncio.run(doctor.check_power_platform(settings))
-        except Exception as exc:  # noqa: BLE001 — surface anything to operator
-            st.error(f"Re-check raised: {exc}")
+            for line, code in wizard_logic.run_pp_management_registration(
+                client_id, skip_signin=skip_signin
+            ):
+                if code is None:
+                    if line:
+                        lines.append(line)
+                        log_area.code(
+                            "\n".join(lines[-40:]), language="text"
+                        )
+                else:
+                    rc = code
+        except FileNotFoundError as exc:
+            status.update(state="error")
+            st.error(str(exc))
             return
-        if result.status == "pass":
-            st.success(f"Registered ✅ — {result.detail}")
+
+        st.session_state[_LOG_KEYS["pp_register"]] = lines
+        confirmed = (
+            rc == 0
+            and wizard_logic.verify_pp_registration_output(lines, client_id)
+        )
+        if confirmed:
+            status.update(state="complete")
+            st.success("Registered ✅")
             _advance(5)
+            return
+        status.update(state="error")
+        if rc == 0:
+            st.error(
+                "PowerShell completed but registration could not be "
+                "confirmed. Check the output above."
+            )
         else:
-            st.error(f"Not registered yet — {result.detail}")
+            st.error(f"PowerShell exited with code {rc}.")
+
+
+def _render_step_4_manual_fallback(client_id: str) -> None:
+    with st.expander("Manual fallback", expanded=False):
+        st.write(
+            "If the automated run keeps failing, run the cmdlets below in "
+            "your own PowerShell window, then click Re-check."
+        )
+        commands = (
+            "Install-Module -Name Microsoft.PowerApps.Administration.PowerShell "
+            "-Force -AllowClobber -Scope CurrentUser\n"
+            "Add-PowerAppsAccount\n"
+            f"New-PowerAppManagementApp -ApplicationId {client_id}"
+        )
+        st.code(commands, language="powershell")
+        st.info(
+            "Note: `New-PowerAppManagementApp` may take 30–60 seconds to "
+            "propagate after the cmdlet completes. If the first Re-check "
+            "fails, wait and try again."
+        )
+        if st.button("Re-check", type="primary", key="step4_manual_recheck"):
+            try:
+                settings = Settings()
+                result = asyncio.run(doctor.check_power_platform(settings))
+            except Exception as exc:  # noqa: BLE001 — surface anything to operator
+                st.error(f"Re-check raised: {exc}")
+                return
+            if result.status == "pass":
+                st.success(f"Registered ✅ — {result.detail}")
+                _advance(5)
+            else:
+                st.error(f"Not registered yet — {result.detail}")
 
 
 def _render_step_5() -> None:
     st.header("Step 5 of 7 — Verify")
     st.write(
         "Running the full doctor check. Expect Graph ✅, Power Platform ✅, "
-        "Delegated ❌ (no `mcp-scan login` yet — that's fine), Dataverse ❌ "
-        "on every environment until Step 6 is done."
+        "and Delegated ❌ (no `mcp-scan login` yet — that's fine). "
+        "Per-environment Dataverse access is provisioned in the next step."
     )
 
     settings = Settings()
@@ -392,26 +552,6 @@ def _render_step_5() -> None:
     pp_ok = any(
         r.audience == "power_platform" and r.status == "pass" for r in results
     )
-
-    st.divider()
-    st.subheader("Per-environment Dataverse (pre-Step 6)")
-    try:
-        envs = list_environments_sync(settings)
-    except Exception as exc:  # noqa: BLE001
-        st.warning(f"Could not list environments: {exc}")
-        envs = []
-
-    for env in envs:
-        try:
-            dv = asyncio.run(doctor.check_dataverse(settings, env))
-        except Exception as exc:  # noqa: BLE001
-            st.caption(f"check_dataverse raised for {env.get('name')}: {exc}")
-            continue
-        icon = "✅" if dv.status == "pass" else "❌"
-        st.caption(f"{icon} {dv.name} — {dv.detail}")
-        st.session_state.status.dataverse_envs[str(env.get("name"))] = (
-            dv.status == "pass"
-        )
 
     if st.button(
         "Continue to environment provisioning",
@@ -464,6 +604,7 @@ def _render_step_6() -> None:
         )
 
     st.divider()
+    wizard = st.session_state.wizard
     if envs:
         header = st.columns([3, 4, 1, 2, 2])
         header[0].write("**Environment**")
@@ -471,8 +612,30 @@ def _render_step_6() -> None:
         header[2].write("**Status**")
         header[3].write("")
         header[4].write("")
-        for env in envs:
-            env_row.render(env, settings)
+        if not wizard.step_6_started:
+            wizard.step_6_started = True
+            status_placeholders: dict[str, Any] = {}
+            for env in envs:
+                env_id = str(env.get("name", ""))
+                status_placeholders[env_id] = env_row.render(
+                    env, settings, status_override="Checking…"
+                )
+            results = asyncio.run(
+                wizard_logic.check_all_envs_dataverse(settings, envs)
+            )
+            for env, result in zip(envs, results):
+                env_id = str(env.get("name", ""))
+                if isinstance(result, BaseException):
+                    passed = False
+                else:
+                    passed = result.status == "pass"
+                st.session_state.status.dataverse_envs[env_id] = passed
+                placeholder = status_placeholders.get(env_id)
+                if placeholder is not None:
+                    placeholder.write("✅" if passed else "❌")
+        else:
+            for env in envs:
+                env_row.render(env, settings)
     else:
         st.caption("No environments returned by Power Platform admin.")
 

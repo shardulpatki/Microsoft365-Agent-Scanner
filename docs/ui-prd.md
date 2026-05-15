@@ -102,11 +102,11 @@ Linear, step-gated via `st.session_state["wizard_step"]`. Operator cannot skip a
 
 | Step | Required behavior |
 |---|---|
-| 1. Prerequisites and Sign In | Detect `az --version` and `jq` with install links; shell `az login --use-device-code --allow-no-subscriptions` below, button disabled until prereqs green, advance on exit 0 |
-| 2. Confirm tenant + app name | Form with `az account show` tenant ID prefilled; app name defaults to "M365 MCP Scanner"; validate `^[A-Za-z0-9 _-]{1,64}$` |
-| 3. Provision | Shell `setup-scanner.sh`; stream log into `st.status`; on success, write `config.toml` with parsed client_id + secret |
-| 4. PP Management App | Display PowerShell copy-paste (`New-PowerAppManagementApp -ApplicationId <appId>`); Re-check button calls `doctor.check_power_platform` (see ADR-0001) |
-| 5. Verify | In-process doctor checks for Graph and PP admin audiences; per-env Dataverse status displayed (expected ❌ pre-Step 6) |
+| 1. Prerequisites and Sign In | Detect `az --version`, `jq`, and `pwsh` (PowerShell 7+) with install links; shell `az login --use-device-code --allow-no-subscriptions` below, button disabled until prereqs green, advance on exit 0 |
+| 2. Confirm tenant + app name | Auto-populated tenant (from `az account show`) and app name (default "M365 MCP Scanner") shown as read-only; one-click **Confirm and continue** with an **Edit** fallback that re-renders the validated two-field form. On confirm, prewarms Power Platform sign-in in a background daemon thread so Step 4 can skip the second browser pop. |
+| 3. Provision | Shell `setup-scanner.sh` (~2-3 min); stream log into `st.status` with a progress bar that advances on each `[N/7]` marker emitted by the script, plus a collapsible **Detailed output** expander for the raw stdout; on success, write `config.toml` with parsed client_id + secret |
+| 4. PP Management App | Run `New-PowerAppManagementApp` via a pwsh subprocess; if the Step 2 prewarm succeeded, skip `Add-PowerAppsAccount` so registration completes in ~5s with no second browser pop; auto-advance on confirmed success; Manual fallback expander preserves the copy-paste + Re-check flow (see ADR-0001 update) |
+| 5. Verify | In-process doctor checks for Graph, PP admin, and delegated session audiences only. Per-env Dataverse is Step 6. |
 | 6. Per-env Dataverse | One row per environment from PP admin enumeration. Each row: status, "Open in admin center" link, "Re-check" button |
 | 7. Finish | Persists `.wizard-completed` marker; redirects to Status (one click from Run Scan via the sidebar) |
 

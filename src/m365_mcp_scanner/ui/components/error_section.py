@@ -114,6 +114,7 @@ def _jump_to_wizard_env(env_id: str | None) -> None:
     if not wizard.exists():
         st.info("Setup wizard ships in Phase 4c.")
         return
+    st.session_state.wizard.step_6_started = False
     st.session_state.wizard.step = 6
     st.session_state.wizard.target_env_id = env_id
     st.switch_page("pages/00_First_Run_Setup.py")
