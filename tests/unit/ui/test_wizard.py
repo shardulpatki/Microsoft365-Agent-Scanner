@@ -530,13 +530,26 @@ def _step_4_source() -> str:
     return src[start:end]
 
 
+def _page_source() -> str:
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    return page.read_text(encoding="utf-8")
+
+
 def test_step_2_confirm_advances_with_defaults() -> None:
     body = _step_2_source()
     assert '"Confirm and continue"' in body
     assert "type=\"primary\"" in body
     assert "step_2_editing" in body
-    assert "_kick_off_prewarm()" in body
     assert "_advance(3)" in body
+    # Confirm no longer triggers the background prewarm.
+    assert "_kick_off_prewarm" not in body
 
 
 def test_step_2_edit_toggle_renders_form() -> None:
@@ -555,11 +568,49 @@ def test_step_2_edit_then_confirm_uses_edited_values() -> None:
     assert "wizard.tenant_id = tenant_id" in edit_body
     assert "wizard.app_name = app_name" in edit_body
     assert "_advance(3)" in edit_body
+    # Edit-mode submit no longer triggers the background prewarm.
+    assert "_kick_off_prewarm" not in edit_body
 
 
-def test_step_2_caption_mentions_second_browser_signin() -> None:
+def test_step_2_powerplatform_button_renders() -> None:
+    body = _page_source()
+    assert '"Sign in for Power Platform"' in body
+    assert "Power Platform sign-in (optional)" in body
+    # Rendered from Step 2 (both display and edit modes).
+    step_2 = _step_2_source()
+    assert step_2.count("_render_powerplatform_signin_section()") >= 2
+
+
+def test_step_2_powerplatform_button_calls_prewarm() -> None:
+    body = _page_source()
+    start = body.index("def _render_powerplatform_signin_section(")
+    end = body.index("def _render_step_2(")
+    helper = body[start:end]
+    assert "wizard_logic.prewarm_powerapps_account(" in helper
+    assert "st.spinner(" in helper
+    assert "powerplatform_signin_attempted" in helper
+    assert "powerplatform_signin_succeeded" in helper
+
+
+def test_step_2_confirm_works_without_powerplatform_signin() -> None:
+    # Confirm path advances to Step 3 independently of the Power Platform
+    # sign-in attempt — the sign-in is optional.
     body = _step_2_source()
-    assert "second browser sign-in" in body
+    display_path = body.split('st.form("step2_form")')[0]
+    assert "_advance(3)" in display_path
+    assert "powerplatform_signin_attempted" not in display_path
+    assert "powerplatform_signin_succeeded" not in display_path
+
+
+def test_step_2_no_daemon_thread_on_confirm() -> None:
+    body = _page_source()
+    # The daemon-thread prewarm helper is gone; the threading import
+    # should no longer be needed by this page.
+    assert "_kick_off_prewarm" not in body
+    assert "import threading" not in body
+    assert "threading.Thread" not in body
+    # The misleading caption is gone too.
+    assert "second browser sign-in" not in body
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -24,6 +25,8 @@ class WizardState:
     step_2_editing: bool = False
     step_4_started: bool = False
     step_6_started: bool = False
+    powerplatform_signin_attempted: bool = False
+    powerplatform_signin_succeeded: bool = False
 
 
 @dataclass
@@ -42,10 +45,29 @@ class ScanContext:
     current_run_proc: Optional[int] = None
 
 
+# Schema-change resilience: Streamlit can hold pickled dataclass
+# instances across launches. When a field is added to a dataclass,
+# old instances lack the field and access raises AttributeError.
+# This helper detects the mismatch so init_session_state can replace
+# the stale instance.
+def _needs_reset(key: str, dataclass_type: type) -> bool:
+    """Return True if session_state[key] is missing, of the wrong
+    type, or missing fields the dataclass now defines."""
+    if key not in st.session_state:
+        return True
+    obj = st.session_state[key]
+    if not isinstance(obj, dataclass_type):
+        return True
+    expected_fields = {f.name for f in dataclasses.fields(dataclass_type)}
+    actual_fields = set(vars(obj).keys())
+    missing = expected_fields - actual_fields
+    return bool(missing)
+
+
 def init_session_state() -> None:
-    if "wizard" not in st.session_state:
+    if _needs_reset("wizard", WizardState):
         st.session_state.wizard = WizardState()
-    if "status" not in st.session_state:
+    if _needs_reset("status", StatusCache):
         st.session_state.status = StatusCache()
-    if "scan" not in st.session_state:
+    if _needs_reset("scan", ScanContext):
         st.session_state.scan = ScanContext()

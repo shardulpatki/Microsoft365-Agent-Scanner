@@ -64,3 +64,58 @@ def test_init_session_state_idempotent(
     fake_streamlit.session_state["wizard"].step = 4  # type: ignore[attr-defined]
     init_session_state()
     assert fake_streamlit.session_state["wizard"].step == 4  # type: ignore[attr-defined]
+
+
+def test_needs_reset_when_key_missing(
+    fake_streamlit: types.ModuleType,
+) -> None:
+    from m365_mcp_scanner.ui.state import WizardState, _needs_reset
+
+    assert _needs_reset("wizard", WizardState) is True
+
+
+def test_needs_reset_when_wrong_type(
+    fake_streamlit: types.ModuleType,
+) -> None:
+    from m365_mcp_scanner.ui.state import WizardState, _needs_reset
+
+    fake_streamlit.session_state["wizard"] = "not a dataclass"  # type: ignore[attr-defined]
+    assert _needs_reset("wizard", WizardState) is True
+
+
+def test_needs_reset_when_fields_missing(
+    fake_streamlit: types.ModuleType,
+) -> None:
+    from m365_mcp_scanner.ui.state import WizardState, _needs_reset
+
+    stale = WizardState()
+    delattr(stale, "powerplatform_signin_attempted")
+    fake_streamlit.session_state["wizard"] = stale  # type: ignore[attr-defined]
+    assert _needs_reset("wizard", WizardState) is True
+
+
+def test_needs_reset_returns_false_when_valid(
+    fake_streamlit: types.ModuleType,
+) -> None:
+    from m365_mcp_scanner.ui.state import WizardState, _needs_reset
+
+    fake_streamlit.session_state["wizard"] = WizardState()  # type: ignore[attr-defined]
+    assert _needs_reset("wizard", WizardState) is False
+
+
+def test_init_session_state_resets_stale_wizard(
+    fake_streamlit: types.ModuleType,
+) -> None:
+    from m365_mcp_scanner.ui.state import WizardState, init_session_state
+
+    stale = WizardState()
+    delattr(stale, "powerplatform_signin_attempted")
+    fake_streamlit.session_state["wizard"] = stale  # type: ignore[attr-defined]
+
+    init_session_state()
+
+    fresh = fake_streamlit.session_state["wizard"]  # type: ignore[attr-defined]
+    assert fresh is not stale
+    assert isinstance(fresh, WizardState)
+    assert hasattr(fresh, "powerplatform_signin_attempted")
+    assert fresh.powerplatform_signin_attempted is False

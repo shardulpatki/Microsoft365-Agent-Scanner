@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -31,6 +30,7 @@ from typing import Any
 import streamlit as st
 
 logger = logging.getLogger(__name__)
+
 
 from m365_mcp_scanner.auth import doctor
 from m365_mcp_scanner.auth.msal_bootstrap import (
@@ -179,23 +179,67 @@ def _offer_device_code_fallback() -> None:
         st.code(msg, language="text")
 
 
-def _kick_off_prewarm() -> None:
-    """Spawn a daemon thread that runs Add-PowerAppsAccount in the background.
+_PP_SIGNIN_OUTPUT_KEY = "_wizard_pp_signin_output"
+_PP_SIGNIN_RUNNING_KEY = "pp_signin_running"
 
-    The thread discards subprocess output (it is not on the Streamlit thread
-    and must not touch ``st.*``). Status is communicated via the on-disk
-    prewarm status file that ``wizard_logic.prewarm_powerapps_account``
-    writes.
+
+def _render_powerplatform_signin_section() -> None:
+    """Render the optional, operator-triggered Power Platform sign-in.
+
+    Clicking the button drives ``prewarm_powerapps_account`` synchronously
+    under ``st.spinner``. The status file rendezvous with Step 4 is
+    written by the generator itself, so Step 4 needs no changes.
     """
-    def _run() -> None:
-        try:
-            for _line, _code in wizard_logic.prewarm_powerapps_account():
-                pass
-        except Exception:  # noqa: BLE001 — best-effort warm-up
-            pass
+    wizard = st.session_state.wizard
+    st.subheader("Power Platform sign-in (optional)")
+    st.caption(
+        "Power Platform requires a separate Microsoft sign-in for its "
+        "PowerShell admin cmdlets. Signing in now takes ~10 seconds and "
+        "makes Step 4 run in ~5 seconds instead of ~30. You can skip "
+        "this — Step 4 will sign in for you if needed."
+    )
 
-    t = threading.Thread(target=_run, daemon=True)
-    t.start()
+    running = bool(st.session_state.get(_PP_SIGNIN_RUNNING_KEY, False))
+    clicked = st.button(
+        "Sign in for Power Platform",
+        type="primary",
+        disabled=running,
+        key="pp_signin_btn",
+    )
+
+    if wizard.powerplatform_signin_attempted:
+        if wizard.powerplatform_signin_succeeded:
+            st.success("✓ Power Platform session ready")
+        else:
+            st.error(
+                "✗ Sign-in failed. Step 4 will sign in for you when it runs."
+            )
+            tail = st.session_state.get(_PP_SIGNIN_OUTPUT_KEY) or []
+            if tail:
+                with st.expander("Error details"):
+                    st.code("\n".join(tail), language="text")
+    else:
+        st.caption("Not signed in yet")
+
+    if clicked:
+        st.session_state[_PP_SIGNIN_RUNNING_KEY] = True
+        output_lines: list[str] = []
+        last_rc: int | None = None
+        with st.spinner("Signing in to Power Platform…"):
+            try:
+                for line, code in wizard_logic.prewarm_powerapps_account():
+                    if line:
+                        output_lines.append(line)
+                    if code is not None:
+                        last_rc = code
+            except Exception as exc:  # noqa: BLE001 — surface to operator
+                output_lines.append(f"Error: {exc}")
+                last_rc = -1
+        wizard.powerplatform_signin_attempted = True
+        wizard.powerplatform_signin_succeeded = last_rc == 0
+        st.session_state[_PP_SIGNIN_OUTPUT_KEY] = output_lines[-20:]
+        st.session_state[_PP_SIGNIN_RUNNING_KEY] = False
+        st.rerun()
 
 
 def _render_step_2() -> None:
@@ -215,14 +259,11 @@ def _render_step_2() -> None:
         st.markdown("**App display name**")
         st.code(default_app_name, language="text")
 
+        _render_powerplatform_signin_section()
+
         col_a, col_b = st.columns([1, 1])
         confirm = col_a.button("Confirm and continue", type="primary")
         edit = col_b.button("Edit")
-        st.caption(
-            "Tip: A second browser sign-in may appear shortly — that's "
-            "the Power Platform session warming up. You can complete it "
-            "any time before Step 4."
-        )
 
         if confirm:
             if not validate_tenant_id(default_tenant):
@@ -234,12 +275,13 @@ def _render_step_2() -> None:
             wizard.tenant_id = default_tenant
             wizard.app_name = default_app_name
             wizard.step_2_editing = False
-            _kick_off_prewarm()
             _advance(3)
         if edit:
             wizard.step_2_editing = True
             st.rerun()
         return
+
+    _render_powerplatform_signin_section()
 
     with st.form("step2_form"):
         tenant_id = st.text_input(
@@ -270,7 +312,6 @@ def _render_step_2() -> None:
         wizard.tenant_id = tenant_id
         wizard.app_name = app_name
         wizard.step_2_editing = False
-        _kick_off_prewarm()
         _advance(3)
 
 
@@ -373,7 +414,6 @@ def _render_step_4() -> None:
     log_area = st.empty()
 
     prewarm_status = wizard_logic.read_prewarm_status()
-    print(f"step 4 entered; prewarm status: {prewarm_status}", flush=True)
     skip_signin = prewarm_status == "succeeded"
     if skip_signin:
         st.caption(

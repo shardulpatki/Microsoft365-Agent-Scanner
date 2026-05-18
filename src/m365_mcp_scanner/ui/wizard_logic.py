@@ -308,10 +308,11 @@ def prewarm_powerapps_account(
 ) -> Iterator[tuple[str, int | None]]:
     """Run ``Add-PowerAppsAccount`` via pwsh, writing prewarm status to disk.
 
-    Yields ``stream_subprocess`` output. Caller should not block on this; it
-    is a fire-and-forget warm-up. Failures (pwsh missing, module missing,
-    sign-in cancelled, non-zero exit) are non-fatal — Step 4 retries the
-    call as part of its normal flow.
+    Caller drives the generator to completion; intended for synchronous use
+    under ``st.spinner`` in Step 2 (operator-triggered). Failures (pwsh
+    missing, module missing, sign-in cancelled, non-zero exit) are
+    non-fatal — Step 4 retries the call as part of its normal flow when
+    the status file is missing or not ``"succeeded"``.
     """
     _write_prewarm_status("running", status_path)
     rc: int | None = None
