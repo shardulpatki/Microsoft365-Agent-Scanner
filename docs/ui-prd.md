@@ -64,10 +64,10 @@ The first two personas may be the same human; the third is read-only over their 
 
 The operator installs the package, runs `mcp-scan ui`, and lands on the setup wizard because no config exists. They click through:
 
-1. Prerequisites check (`az` installed, version ≥ 2.50)
-2. Sign in with Azure CLI (button shells `az login`)
+1. Prerequisites check (`pwsh` installed; `az` and `jq` no longer required — see ADR-0003)
+2. Sign in with Microsoft (in-process MSAL public-client auth-code-PKCE flow opens the operator's browser; device-code fallback available)
 3. Confirm tenant ID and app name
-4. Provision tenant (button runs `setup-scanner.sh`, streams log)
+4. Provision tenant (in-process Microsoft Graph calls, ~30 s; see ADR-0003)
 5. Register as Power Platform Management App (guided PowerShell copy-paste; see ADR-0001)
 6. Verify (Graph + PP admin checks)
 7. Per-environment Dataverse provisioning (deep links + re-check)
@@ -102,15 +102,15 @@ Linear, step-gated via `st.session_state["wizard_step"]`. Operator cannot skip a
 
 | Step | Required behavior |
 |---|---|
-| 1. Prerequisites and Sign In | Detect `az --version`, `jq`, and `pwsh` (PowerShell 7+) with install links; shell `az login --use-device-code --allow-no-subscriptions` below, button disabled until prereqs green, advance on exit 0 |
-| 2. Confirm tenant + app name | Auto-populated tenant (from `az account show`) and app name (default "M365 MCP Scanner") shown as read-only; one-click **Confirm and continue** with an **Edit** fallback that re-renders the validated two-field form. On confirm, prewarms Power Platform sign-in in a background daemon thread so Step 4 can skip the second browser pop. |
-| 3. Provision | Shell `setup-scanner.sh` (~2-3 min); stream log into `st.status` with a progress bar that advances on each `[N/7]` marker emitted by the script, plus a collapsible **Detailed output** expander for the raw stdout; on success, write `config.toml` with parsed client_id + secret |
+| 1. Prerequisites and Sign In | Detect `pwsh` (PowerShell 7+) only; click **Sign in with Microsoft** to run in-process MSAL auth-code-PKCE with a localhost redirect listener; device-code fallback button surfaces if the local listener fails. See ADR-0003. |
+| 2. Confirm tenant + app name | Auto-populated tenant (from the id_token `tid` claim) and app name (default "M365 MCP Scanner") shown as read-only; one-click **Confirm and continue** with an **Edit** fallback that re-renders the validated two-field form. On confirm, prewarms Power Platform sign-in in a background daemon thread so Step 4 can skip the second browser pop. |
+| 3. Provision | In-process async httpx calls to Microsoft Graph (~30 s); progress callback drives the progress bar substep-by-substep; collapsible **Detailed output** expander shows the substep log. On success, writes `config.toml` with the new app's client_id + secret. See ADR-0003. |
 | 4. PP Management App | Run `New-PowerAppManagementApp` via a pwsh subprocess; if the Step 2 prewarm succeeded, skip `Add-PowerAppsAccount` so registration completes in ~5s with no second browser pop; auto-advance on confirmed success; Manual fallback expander preserves the copy-paste + Re-check flow (see ADR-0001 update) |
 | 5. Verify | In-process doctor checks for Graph, PP admin, and delegated session audiences only. Per-env Dataverse is Step 6. |
 | 6. Per-env Dataverse | One row per environment from PP admin enumeration. Each row: status, "Open in admin center" link, "Re-check" button |
 | 7. Finish | Persists `.wizard-completed` marker; redirects to Status (one click from Run Scan via the sidebar) |
 
-**Requirement: setup-scanner.sh must emit machine-readable client_id + client_secret** to a known path (e.g. `~/.m365-mcp-scanner/.setup-output.json`) for the wizard to parse. Updating the script is a prerequisite to this PRD shipping.
+**Note (2026-05-18):** The earlier `setup-scanner.sh` → `.setup-output.json` handoff has been replaced by in-process Graph provisioning. The provisioner returns a structured `ProvisionResult` directly to the wizard; no JSON file round-trip. See ADR-0003.
 
 ### Page 1 — Status
 

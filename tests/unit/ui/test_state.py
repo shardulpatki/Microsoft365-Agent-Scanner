@@ -48,7 +48,7 @@ def test_init_session_state_creates_three_dataclasses(
     assert s["wizard"].step == 1
     assert s["wizard"].app_name == "M365 MCP Scanner"
     assert s["wizard"].tenant_id is None
-    assert s["wizard"].az_logged_in is False
+    assert s["wizard"].bootstrap_token is None
     assert s["status"].dataverse_envs == {}
     assert s["status"].graph_ok is None
     assert s["scan"].selected_scan_id is None

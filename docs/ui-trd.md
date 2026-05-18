@@ -2,8 +2,16 @@
 
 **Status:** Draft, Phase 4 planning
 **Owner:** Abuzar Amini
-**Date:** 2026-05-13
+**Date:** 2026-05-13 (auth/provisioning section superseded 2026-05-18 by ADR-0003)
 **Companion doc:** `docs/ui-prd.md`
+
+> **Update 2026-05-18** — sections describing `az login`, `setup-scanner.sh`,
+> and `.setup-output.json` reflect the original Phase 4c design. The wizard
+> now signs in via in-process MSAL public-client auth-code-PKCE and
+> provisions via direct Microsoft Graph httpx calls. See
+> `docs/decisions/0003-msal-and-direct-graph.md` for the architecture in
+> force and rationale. References below to the bash/az layer are retained
+> for rollback context only.
 
 ---
 

@@ -12,13 +12,8 @@ from types import SimpleNamespace
 
 from m365_mcp_scanner.ui import wizard_logic
 from m365_mcp_scanner.ui.wizard_logic import (
-    MIN_AZ_VERSION,
     CliDetection,
-    az_account_tenant,
     detect_cli,
-    ingest_setup_output,
-    parse_az_version,
-    parse_step_marker,
     prewarm_powerapps_account,
     read_prewarm_status,
     run_pp_management_registration,
@@ -98,24 +93,6 @@ def test_validate_env_id_rejects_default_prefix_with_bad_guid() -> None:
     assert validate_env_id("Default-not-a-guid") is False
     assert validate_env_id("Default-") is False
     assert validate_env_id("default-6cf34320-1234-5678-9abc-def012345678") is False
-
-
-# ---------------------------------------------------------------------------
-# parse_az_version
-# ---------------------------------------------------------------------------
-
-
-def test_parse_az_version_extracts_first_line() -> None:
-    stdout = "azure-cli                         2.86.0\n\ncore         2.86.0\n"
-    assert parse_az_version(stdout) == (2, 86, 0)
-
-
-def test_parse_az_version_returns_none_when_absent() -> None:
-    assert parse_az_version("some unrelated output") is None
-
-
-def test_min_az_version_constant() -> None:
-    assert MIN_AZ_VERSION == (2, 50, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -223,58 +200,6 @@ def test_detect_cli_default_timeout_is_30() -> None:
     import inspect
 
     assert inspect.signature(detect_cli).parameters["timeout"].default == 30.0
-    assert inspect.signature(az_account_tenant).parameters["timeout"].default == 30.0
-
-
-def test_az_version_below_minimum_still_uses_existing_parse_logic(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(wizard_logic.shutil, "which", lambda _cmd: "/usr/bin/az")
-    monkeypatch.setattr(
-        wizard_logic.subprocess,
-        "run",
-        lambda *_a, **_kw: SimpleNamespace(
-            returncode=0, stdout="azure-cli 2.49.0\n", stderr=""
-        ),
-    )
-
-    result = detect_cli("az")
-    parsed = parse_az_version(result.stdout)
-
-    assert result.status == "ok"
-    assert parsed == (2, 49, 0)
-    assert parsed is not None and parsed < MIN_AZ_VERSION
-
-
-# ---------------------------------------------------------------------------
-# az_account_tenant — Windows PATHEXT resolution (parallel to detect_cli fix)
-# ---------------------------------------------------------------------------
-
-
-def test_az_account_tenant_returns_none_when_which_returns_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(wizard_logic.shutil, "which", lambda _cmd: None)
-    monkeypatch.setattr(wizard_logic.subprocess, "run", _fail_if_called)
-
-    assert az_account_tenant() is None
-
-
-def test_az_account_tenant_returns_tenant_on_success(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(wizard_logic.shutil, "which", lambda _cmd: "/usr/bin/az")
-    monkeypatch.setattr(
-        wizard_logic.subprocess,
-        "run",
-        lambda *_a, **_kw: SimpleNamespace(
-            returncode=0,
-            stdout="6cf34320-1234-5678-9abc-def012345678\n",
-            stderr="",
-        ),
-    )
-
-    assert az_account_tenant() == "6cf34320-1234-5678-9abc-def012345678"
 
 
 # ---------------------------------------------------------------------------
@@ -319,60 +244,6 @@ def test_write_config_toml_creates_missing_data_dir(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# ingest_setup_output
-# ---------------------------------------------------------------------------
-
-
-def _setup_output_fixture() -> dict[str, object]:
-    return {
-        "client_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-        "client_secret": "the-secret",
-        "tenant_id": "6cf34320-1234-5678-9abc-def012345678",
-        "app_object_id": "11111111-2222-3333-4444-555555555555",
-        "admin_consent_granted": True,
-        "completed_at": "2026-05-14T12:00:00Z",
-    }
-
-
-def test_ingest_setup_output_writes_config_and_deletes_source(
-    tmp_path: Path,
-) -> None:
-    output_path = tmp_path / ".setup-output.json"
-    output_path.write_text(json.dumps(_setup_output_fixture()), encoding="utf-8")
-
-    client_id, app_object_id = ingest_setup_output(output_path, tmp_path)
-
-    assert client_id == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-    assert app_object_id == "11111111-2222-3333-4444-555555555555"
-    assert not output_path.exists()
-
-    body = (tmp_path / "config.toml").read_text(encoding="utf-8")
-    assert "the-secret" in body
-    assert "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" in body
-
-
-def test_ingest_setup_output_raises_on_missing_field(tmp_path: Path) -> None:
-    output_path = tmp_path / ".setup-output.json"
-    incomplete = _setup_output_fixture()
-    del incomplete["client_secret"]
-    output_path.write_text(json.dumps(incomplete), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="client_secret"):
-        ingest_setup_output(output_path, tmp_path)
-
-    # Source file is left in place so the operator can retry.
-    assert output_path.exists()
-
-
-def test_ingest_setup_output_raises_on_malformed_json(tmp_path: Path) -> None:
-    output_path = tmp_path / ".setup-output.json"
-    output_path.write_text("not valid json", encoding="utf-8")
-
-    with pytest.raises(json.JSONDecodeError):
-        ingest_setup_output(output_path, tmp_path)
-
-
-# ---------------------------------------------------------------------------
 # Cross-page entry: target_env_id present → wizard step jumps to 6
 # ---------------------------------------------------------------------------
 
@@ -406,12 +277,12 @@ def test_errors_page_fix_button_targets_step_6(fake_streamlit: "types.ModuleType
 
 
 # ---------------------------------------------------------------------------
-# Step 1 (merged Prereqs + Sign In) advances to Step 2 on successful az login
+# Step 1 — MSAL bootstrap sign-in advances to Step 2
 # ---------------------------------------------------------------------------
 
 
-def test_render_step_1_advances_to_step_2_after_az_login() -> None:
-    """Successful az login in merged Step 1 captures tenant_id and advances to step 2."""
+def test_render_step_1_uses_msal_bootstrap_sign_in() -> None:
+    """Step 1 renders an in-process MSAL sign-in, not az login."""
     page = (
         Path(__file__).resolve().parents[3]
         / "src"
@@ -422,12 +293,30 @@ def test_render_step_1_advances_to_step_2_after_az_login() -> None:
     )
     src = page.read_text(encoding="utf-8")
     start = src.index("def _render_step_1(")
-    end = src.index("def _render_step_2(")
+    end = src.index("def _device_code_prompt(")
     body = src[start:end]
-    assert "st.session_state.wizard.tenant_id = tenant" in body
-    assert "st.session_state.wizard.az_logged_in = True" in body
+    assert "wizard_logic.bootstrap_sign_in" in body
+    assert "Sign in with Microsoft" in body
     assert "_advance(2)" in body
-    assert "disabled=not all_prereqs_ok" in body
+    # The az path is gone.
+    assert "az_logged_in" not in body
+    assert "az login" not in body
+    assert "stream_subprocess" not in body
+
+
+def test_render_step_1_offers_device_code_fallback() -> None:
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    assert "bootstrap_sign_in_device_code" in src
+    assert "BootstrapAuthError" in src
+    assert "BootstrapAuthTimeout" in src
 
 
 # ---------------------------------------------------------------------------
@@ -674,42 +563,25 @@ def test_step_2_caption_mentions_second_browser_signin() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Change 2 — parse_step_marker + Step 3 progress bar
+# Step 3 — in-process provisioner replaces bash subprocess
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "line,expected",
-    [
-        ("[1/7] Resolving tenant…", 1),
-        ("[3/7] Creating service principal", 3),
-        ("[7/7] Done", 7),
-        ("prefix [4/7] suffix", 4),
-    ],
-)
-def test_parse_step_marker_extracts_n(line: str, expected: int) -> None:
-    assert parse_step_marker(line) == expected
-
-
-@pytest.mark.parametrize(
-    "line",
-    ["", "some log line", "[abc/7]", "[1/8] wrong denominator", "7/7"],
-)
-def test_parse_step_marker_returns_none_on_unrelated_lines(line: str) -> None:
-    assert parse_step_marker(line) is None
-
-
-def test_parse_step_marker_caps_at_seven() -> None:
-    assert parse_step_marker("[12/7] runaway") == 7
-    assert parse_step_marker("[0/7] start") == 0
-
-
-def test_render_step_3_uses_progress_bar() -> None:
+def test_render_step_3_uses_in_process_provisioner() -> None:
     body = _step_3_source()
-    assert 'Provision tenant (~2-3 min)' in body
+    assert "wizard_logic.run_provisioning" in body
     assert "st.progress(" in body
-    assert "wizard_logic.parse_step_marker" in body
     assert 'st.expander("Detailed output"' in body
+    # No more bash / setup-scanner.sh.
+    assert "setup-scanner.sh" not in body
+    assert 'subprocess.Popen(["bash"' not in body
+    assert "stream_subprocess" not in body
+
+
+def test_render_step_3_handles_pp_admin_role_failure() -> None:
+    body = _step_3_source()
+    assert "pp_admin_role_assigned" in body
+    assert "ProvisionError" in body
 
 
 # ---------------------------------------------------------------------------

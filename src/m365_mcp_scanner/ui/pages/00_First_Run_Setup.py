@@ -1,8 +1,10 @@
 """First-Run Setup Wizard — 7-step Streamlit flow.
 
-Drives ``scripts/setup-scanner.sh`` and the Power Platform Management App
-registration, ingests ``.setup-output.json`` into ``config.toml``, and walks
-the operator through per-environment Dataverse provisioning. Phase 4c.
+Step 1 signs in via in-process MSAL (auth-code-PKCE with localhost
+listener; device-code as fallback). Step 3 provisions the scanner's
+Entra app + service principal directly via Microsoft Graph (async httpx)
+and persists ``config.toml``. Step 4 registers the Power Platform
+management app via pwsh as before.
 
 Manual verification checklist (Armor19, post-review, not a Claude Code task):
 
@@ -20,11 +22,8 @@ Manual verification checklist (Armor19, post-review, not a Claude Code task):
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import sys
 import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -34,40 +33,30 @@ import streamlit as st
 logger = logging.getLogger(__name__)
 
 from m365_mcp_scanner.auth import doctor
+from m365_mcp_scanner.auth.msal_bootstrap import (
+    BootstrapAuthError,
+    BootstrapAuthTimeout,
+)
 from m365_mcp_scanner.config import Settings
+from m365_mcp_scanner.provisioning import ProvisionError
 from m365_mcp_scanner.ui.components import env_row
-from m365_mcp_scanner.ui.runners import stream_subprocess
 from m365_mcp_scanner.ui.state import init_session_state
 from m365_mcp_scanner.ui import wizard_logic
 from m365_mcp_scanner.ui.wizard_logic import (
-    MIN_AZ_VERSION,
-    az_account_tenant,
     detect_cli,
-    ingest_setup_output,
     list_environments_sync,
-    parse_az_version,
     validate_app_name,
     validate_tenant_id,
 )
 
 DATA_DIR = Path.home() / ".m365-mcp-scanner"
-SETUP_OUTPUT = DATA_DIR / ".setup-output.json"
 CONFIG_TOML = DATA_DIR / "config.toml"
 WIZARD_DONE_MARKER = DATA_DIR / ".wizard-completed"
 
 _LOG_KEYS = {
-    "az_login": "_wizard_az_login_log",
     "provision": "_wizard_provision_log",
     "pp_register": "_wizard_pp_register_log",
 }
-
-
-def setup_scanner_script_path() -> Path:
-    """Resolve scripts/setup-scanner.sh relative to this module.
-
-    Path layout: pages → ui → m365_mcp_scanner → src → repo.
-    """
-    return Path(__file__).resolve().parents[4] / "scripts" / "setup-scanner.sh"
 
 
 # ---------------------------------------------------------------------------
@@ -90,59 +79,14 @@ def _advance(step: int) -> None:
     st.rerun()
 
 
-def _az_install_link() -> str:
-    if sys.platform.startswith("win"):
-        return "- Windows: <https://aka.ms/installazurecliwindows>"
-    return (
-        "- All platforms: "
-        "<https://learn.microsoft.com/cli/azure/install-azure-cli>"
-    )
-
-
 def _render_step_1() -> None:
     st.header("Step 1 of 7 — Prerequisites and Sign In")
 
     st.subheader("Prerequisites")
     st.write(
-        "Verifying that Azure CLI, `jq`, and PowerShell 7+ (`pwsh`) are "
-        "installed. Azure CLI and jq drive the provisioning script; pwsh "
-        "runs the Power Platform Management App registration in Step 4."
+        "Verifying that PowerShell 7+ (`pwsh`) is installed. pwsh runs the "
+        "Power Platform Management App registration in Step 4."
     )
-
-    az = detect_cli("az")
-    az_ver = parse_az_version(az.stdout) if az.status == "ok" else None
-    az_ver_ok = az_ver is not None and az_ver >= MIN_AZ_VERSION
-    if az.status == "ok" and az_ver_ok and az_ver is not None:
-        st.success(
-            f"Azure CLI {'.'.join(str(x) for x in az_ver)} detected"
-        )
-    elif az.status == "ok" and not az_ver_ok:
-        st.error(
-            f"Azure CLI {'.'.join(str(x) for x in az_ver or (0, 0, 0))} "
-            f"detected — need >= "
-            f"{'.'.join(str(x) for x in MIN_AZ_VERSION)}."
-        )
-        st.markdown(_az_install_link())
-    elif az.status == "not_on_path":
-        st.error(
-            "Azure CLI binary not found on PATH. Confirm it's installed and "
-            "that the directory containing az.cmd is on PATH."
-        )
-        st.markdown(_az_install_link())
-    else:
-        st.error(az.error or "Azure CLI failed to run.")
-        st.markdown(_az_install_link())
-
-    jq = detect_cli("jq")
-    if jq.status == "ok":
-        st.success("jq detected")
-    elif jq.status == "not_on_path":
-        st.error(
-            "jq not found on PATH. Install: "
-            "<https://jqlang.github.io/jq/download/>"
-        )
-    else:
-        st.error(jq.error or "jq failed to run.")
 
     pwsh = detect_cli("pwsh")
     if pwsh.status == "ok":
@@ -155,76 +99,84 @@ def _render_step_1() -> None:
     else:
         st.error(pwsh.error or "pwsh failed to run.")
 
-    all_prereqs_ok = (
-        az.status == "ok"
-        and az_ver_ok
-        and jq.status == "ok"
-        and pwsh.status == "ok"
-    )
+    prereqs_ok = pwsh.status == "ok"
 
     st.divider()
 
-    st.subheader("Sign in with Azure CLI")
+    st.subheader("Sign in with Microsoft")
     st.write(
-        "Click below to sign in to Azure CLI using a device code. A code and "
-        "URL will appear once the process starts. You must sign in as a "
-        "Global Administrator of the target tenant."
+        "Click below to sign in. Your default browser will open to "
+        "Microsoft's sign-in page; sign in as a Global Administrator of the "
+        "target tenant and return here. No copy-paste required."
     )
 
-    if st.session_state.wizard.az_logged_in:
+    wizard = st.session_state.wizard
+    if wizard.bootstrap_token:
         st.success(
-            f"Already signed in. Active tenant: "
-            f"`{st.session_state.wizard.tenant_id}`"
+            f"Signed in as `{wizard.bootstrap_upn or 'unknown'}`. "
+            f"Active tenant: `{wizard.tenant_id}`"
         )
         if st.button("Continue"):
             _advance(2)
         return
 
-    start = st.button("Sign in with Azure CLI", disabled=not all_prereqs_ok)
-    log_area = st.empty()
+    use_device = st.session_state.get("_wizard_use_device_code", False)
+
+    primary_label = (
+        "Sign in with device code" if use_device else "Sign in with Microsoft"
+    )
+    start = st.button(primary_label, disabled=not prereqs_ok, type="primary")
 
     if start:
-        lines: list[str] = []
-        rc: int | None = None
-        t_login_start = time.monotonic()
-        try:
-            for line, code in stream_subprocess(
-                ["az", "login", "--use-device-code", "--allow-no-subscriptions"]
-            ):
-                if code is None:
-                    if line:
-                        lines.append(line)
-                        log_area.code("\n".join(lines[-30:]), language="text")
+        with st.spinner("Waiting for browser sign-in…"):
+            try:
+                if use_device:
+                    result = wizard_logic.bootstrap_sign_in_device_code(
+                        on_prompt=_device_code_prompt
+                    )
                 else:
-                    rc = code
-        except FileNotFoundError as exc:
-            st.error(str(exc))
-            return
-        print(
-            f"az login completed in {time.monotonic() - t_login_start:.2f}s (rc={rc})",
-            flush=True,
+                    result = wizard_logic.bootstrap_sign_in()
+            except BootstrapAuthTimeout as exc:
+                st.error(f"Sign-in timed out: {exc}")
+                _offer_device_code_fallback()
+                return
+            except BootstrapAuthError as exc:
+                st.error(f"Sign-in failed: {exc}")
+                _offer_device_code_fallback()
+                return
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Sign-in raised: {exc}")
+                _offer_device_code_fallback()
+                return
+
+        wizard.bootstrap_token = result.access_token
+        wizard.bootstrap_account = result.account
+        wizard.bootstrap_upn = result.user_principal_name
+        wizard.tenant_id = result.tenant_id
+        _advance(2)
+
+
+def _device_code_prompt(flow: dict[str, Any]) -> None:
+    """Show the device-code prompt to the operator (called from the worker
+    thread; uses ``st.session_state`` only for storage, no widget mutation)."""
+    st.session_state["_wizard_device_flow_message"] = flow.get("message") or (
+        f"Open {flow.get('verification_uri')} and enter code "
+        f"{flow.get('user_code')}."
+    )
+
+
+def _offer_device_code_fallback() -> None:
+    if not st.session_state.get("_wizard_use_device_code"):
+        st.info(
+            "If a browser cannot open on this machine (locked-down network, "
+            "headless host), try the device-code fallback."
         )
-        st.session_state[_LOG_KEYS["az_login"]] = lines
-        if rc == 0:
-            t_show = time.monotonic()
-            tenant = az_account_tenant()
-            print(
-                f"az account show completed in {time.monotonic() - t_show:.2f}s "
-                f"(tenant_resolved={tenant is not None})",
-                flush=True,
-            )
-            if tenant is None:
-                st.error(
-                    "`az login` succeeded but `az account show` returned no "
-                    "tenantId. Confirm an active subscription exists in the "
-                    "target tenant."
-                )
-            else:
-                st.session_state.wizard.tenant_id = tenant
-                st.session_state.wizard.az_logged_in = True
-                _advance(2)
-        else:
-            st.error(f"`az login` failed with exit code {rc}.")
+        if st.button("Switch to device-code sign-in"):
+            st.session_state["_wizard_use_device_code"] = True
+            st.rerun()
+    msg = st.session_state.get("_wizard_device_flow_message")
+    if msg:
+        st.code(msg, language="text")
 
 
 def _kick_off_prewarm() -> None:
@@ -326,18 +278,17 @@ def _render_step_3() -> None:
     st.header("Step 3 of 7 — Provision tenant")
     wizard = st.session_state.wizard
     st.write(
-        f"This runs `scripts/setup-scanner.sh` against tenant "
-        f"`{wizard.tenant_id}`. Takes ~2-3 minutes. It creates the Entra "
-        "app, service principal, secret, permissions, admin consent, and "
-        "Power Platform Administrator role."
+        f"Provisioning the scanner's Entra app + service principal against "
+        f"tenant `{wizard.tenant_id}` via Microsoft Graph. Takes ~30 "
+        "seconds. Creates the app, secret, permissions, admin consent, and "
+        "the Power Platform Administrator role assignment."
     )
 
-    script = setup_scanner_script_path()
-    if not script.exists():
-        st.error(f"setup-scanner.sh not found at {script}.")
+    if not wizard.bootstrap_token:
+        st.error("Missing bootstrap sign-in — go back to Step 1.")
         return
 
-    if st.button("Provision tenant (~2-3 min)", type="primary"):
+    if st.button("Provision tenant (~30s)", type="primary"):
         if not (
             validate_tenant_id(wizard.tenant_id or "")
             and validate_app_name(wizard.app_name)
@@ -347,61 +298,61 @@ def _render_step_3() -> None:
             )
             return
 
-        lines: list[str] = []
-        rc: int | None = None
+        log_lines: list[str] = []
         with st.status("Provisioning…", expanded=True):
             progress = st.progress(0.0, text="Starting…")
             with st.expander("Detailed output", expanded=False):
                 log_area = st.empty()
-            try:
-                for line, code in stream_subprocess(
-                    [
-                        "bash",
-                        str(script),
-                        wizard.tenant_id or "",
-                        wizard.app_name,
-                    ]
-                ):
-                    if code is None:
-                        if line:
-                            lines.append(line)
-                            log_area.code(
-                                "\n".join(lines[-30:]), language="text"
-                            )
-                            marker = wizard_logic.parse_step_marker(line)
-                            if marker is not None:
-                                progress.progress(
-                                    marker / 7, text=line.strip()
-                                )
-                    else:
-                        rc = code
-            except FileNotFoundError as exc:
-                st.error(str(exc))
-                return
-            if rc == 0:
-                progress.progress(1.0, text="Provisioned.")
 
-        st.session_state[_LOG_KEYS["provision"]] = lines
-        if rc == 0:
+            def _on_progress(n: int, message: str) -> None:
+                log_lines.append(f"[{n}/8] {message}")
+                log_area.code("\n".join(log_lines[-30:]), language="text")
+                progress.progress(min(n / 8, 1.0), text=message)
+
             try:
-                client_id, app_object_id = ingest_setup_output(
-                    SETUP_OUTPUT, DATA_DIR
+                result = wizard_logic.run_provisioning(
+                    wizard.bootstrap_token,
+                    wizard.bootstrap_account or {},
+                    wizard.tenant_id or "",
+                    wizard.app_name,
+                    progress_callback=_on_progress,
+                    data_dir=DATA_DIR,
                 )
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                st.error(f"Failed to ingest .setup-output.json: {exc}")
+            except ProvisionError as exc:
+                st.error(
+                    f"Provisioning failed at step {exc.step}: {exc.message}"
+                )
+                st.session_state[_LOG_KEYS["provision"]] = log_lines
                 return
-            wizard.client_id = client_id
-            wizard.app_object_id = app_object_id
-            wizard.provisioned_at = datetime.now(timezone.utc)
-            _advance(4)
-        else:
-            st.error(
-                f"setup-scanner.sh exited with code {rc}. Review the log "
-                "above; common causes: not signed in as Global Admin "
-                "(exit 3), app name already exists (exit 3), or transient "
-                "Graph API error (exit 4). Fix the issue and click "
-                "Provision again."
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Provisioning raised: {exc}")
+                st.session_state[_LOG_KEYS["provision"]] = log_lines
+                return
+            progress.progress(1.0, text="Provisioned.")
+
+        st.session_state[_LOG_KEYS["provision"]] = log_lines
+        wizard.client_id = result.client_id
+        wizard.app_object_id = result.app_object_id
+        wizard.provisioned_at = datetime.now(timezone.utc)
+        wizard.pp_admin_role_assigned = result.pp_admin_role_assigned
+        wizard.pp_admin_role_error = result.pp_admin_role_error
+
+        if not result.admin_consent_granted:
+            st.warning(
+                "Provisioning succeeded but admin consent could not be "
+                "fully granted automatically. Grant consent manually in "
+                "the Entra portal under App registrations → API "
+                "permissions → Grant admin consent."
             )
+        if not result.pp_admin_role_assigned:
+            st.warning(
+                "Provisioning succeeded but the Power Platform "
+                "Administrator role could not be assigned automatically: "
+                f"{result.pp_admin_role_error}. Assign it manually in the "
+                "Entra portal under Identity → Roles → Power Platform "
+                "Administrator → Add assignment, then continue."
+            )
+        _advance(4)
 
 
 def _render_step_4() -> None:

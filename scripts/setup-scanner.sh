@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+#
+# DEPRECATED 2026-05-18: The first-run wizard no longer calls this script.
+# See src/m365_mcp_scanner/provisioning/provisioner.py for the in-process
+# Python replacement. This file is retained for reference and rollback.
+#
 # setup-scanner.sh — Automated tenant provisioning for the M365 MCP Scanner.
 #
 # Codifies docs/tenant-setup.md Steps 1–5 (programmatic portion) plus the

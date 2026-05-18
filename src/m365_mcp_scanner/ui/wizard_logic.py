@@ -20,12 +20,22 @@ from typing import Any, Literal
 
 from m365_mcp_scanner.auth import doctor
 from m365_mcp_scanner.auth.doctor import CheckResult
+from m365_mcp_scanner.auth.msal_bootstrap import (
+    BootstrapAuthError,
+    BootstrapAuthResult,
+    BootstrapAuthTimeout,
+    acquire_bootstrap_token,
+    acquire_bootstrap_token_device_code,
+)
 from m365_mcp_scanner.auth.msal_broker import AppOnlyTokenProvider
 from m365_mcp_scanner.clients.power_platform_admin import PowerPlatformAdminClient
 from m365_mcp_scanner.config import Settings
+from m365_mcp_scanner.provisioning import (
+    ProvisionError,
+    ProvisionResult,
+    provision_scanner_app,
+)
 from m365_mcp_scanner.ui.runners import stream_subprocess
-
-MIN_AZ_VERSION = (2, 50, 0)
 
 
 @dataclass(frozen=True)
@@ -96,31 +106,6 @@ def detect_cli(
     )
 
 
-def az_account_tenant(*, timeout: float = 30.0) -> str | None:
-    """Return the active Azure CLI tenant ID, or None if unavailable.
-
-    Resolves ``az`` via ``shutil.which`` so Windows ``PATHEXT`` (``az.cmd``)
-    is honored — bare-name subprocess resolution misses ``.cmd``/``.bat``.
-    """
-    az_path = shutil.which("az")
-    if az_path is None:
-        return None
-    try:
-        proc = subprocess.run(
-            [az_path, "account", "show", "--query", "tenantId", "-o", "tsv"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    if proc.returncode != 0:
-        return None
-    tenant = proc.stdout.strip()
-    return tenant or None
-
-
 APP_NAME_RE = re.compile(r"^[A-Za-z0-9 _-]{1,64}$")
 GUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -136,16 +121,6 @@ ADMIN_CENTER_TMPL = (
     "{env_id}/appusers"
 )
 
-_REQUIRED_OUTPUT_FIELDS = (
-    "client_id",
-    "client_secret",
-    "tenant_id",
-    "app_object_id",
-    "admin_consent_granted",
-    "completed_at",
-)
-
-
 def validate_app_name(name: str) -> bool:
     return bool(APP_NAME_RE.match(name))
 
@@ -156,31 +131,6 @@ def validate_tenant_id(value: str) -> bool:
 
 def validate_env_id(value: str) -> bool:
     return bool(ENV_ID_RE.match(value))
-
-
-_STEP_MARKER_RE = re.compile(r"\[(\d+)/7\]")
-
-
-def parse_step_marker(line: str) -> int | None:
-    """Return N from a ``[N/7]`` substring in line, clamped to ``[0, 7]``.
-
-    Returns ``None`` if no marker is present. Defensive against unexpected
-    lines so the progress bar update path can't crash the wizard.
-    """
-    m = _STEP_MARKER_RE.search(line)
-    if not m:
-        return None
-    n = int(m.group(1))
-    return max(0, min(7, n))
-
-
-def parse_az_version(stdout: str) -> tuple[int, int, int] | None:
-    """Parse ``azure-cli  2.50.0`` from ``az --version`` stdout."""
-    for line in stdout.splitlines():
-        m = re.match(r"\s*azure-cli\s+([0-9]+)\.([0-9]+)\.([0-9]+)", line)
-        if m:
-            return int(m.group(1)), int(m.group(2)), int(m.group(3))
-    return None
 
 
 def admin_center_deep_link(env_id: str) -> str | None:
@@ -214,27 +164,59 @@ def write_config_toml(
     return cfg
 
 
-def ingest_setup_output(
-    output_path: Path, data_dir: Path
-) -> tuple[str, str]:
-    """Read .setup-output.json, write config.toml, delete the source.
+def bootstrap_sign_in(
+    tenant_id: str | None = None, timeout_s: int = 300
+) -> BootstrapAuthResult:
+    """Sync wrapper around :func:`acquire_bootstrap_token` for Streamlit."""
+    return asyncio.run(acquire_bootstrap_token(tenant_id, timeout_s=timeout_s))
 
-    Returns ``(client_id, app_object_id)``. Raises ``ValueError`` on schema
-    mismatch, ``json.JSONDecodeError`` on malformed JSON, ``OSError`` on file
-    issues.
-    """
-    data = json.loads(output_path.read_text(encoding="utf-8"))
-    for key in _REQUIRED_OUTPUT_FIELDS:
-        if key not in data:
-            raise ValueError(f".setup-output.json missing required key: {key}")
-    write_config_toml(
-        tenant_id=str(data["tenant_id"]),
-        client_id=str(data["client_id"]),
-        client_secret=str(data["client_secret"]),
-        data_dir=data_dir,
+
+def bootstrap_sign_in_device_code(
+    on_prompt: Any,
+    tenant_id: str | None = None,
+    timeout_s: int = 600,
+) -> BootstrapAuthResult:
+    """Sync wrapper around device-code fallback. ``on_prompt`` is called once
+    the user code is known; the wizard renders it to the operator."""
+    return asyncio.run(
+        acquire_bootstrap_token_device_code(
+            tenant_id, timeout_s=timeout_s, on_prompt=on_prompt
+        )
     )
-    output_path.unlink()
-    return str(data["client_id"]), str(data["app_object_id"])
+
+
+def run_provisioning(
+    bootstrap_token: str,
+    bootstrap_account: dict[str, Any],
+    tenant_id: str,
+    app_name: str,
+    *,
+    progress_callback: Any = None,
+    data_dir: Path | None = None,
+) -> ProvisionResult:
+    """Sync wrapper that runs the async provisioner and writes config.toml.
+
+    Persists ``client_id``/``client_secret``/``tenant_id`` to
+    ``config.toml`` (mode 600) on success so subsequent doctor runs pick up
+    the new credentials with no additional plumbing.
+    """
+    result = asyncio.run(
+        provision_scanner_app(
+            bootstrap_token,
+            bootstrap_account,
+            tenant_id,
+            app_name,
+            progress_callback=progress_callback,
+        )
+    )
+    target_dir = data_dir or (Path.home() / ".m365-mcp-scanner")
+    write_config_toml(
+        tenant_id=tenant_id,
+        client_id=result.client_id,
+        client_secret=result.client_secret,
+        data_dir=target_dir,
+    )
+    return result
 
 
 _PWSH_REGISTER_SCRIPT = (

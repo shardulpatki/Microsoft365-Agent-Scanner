@@ -12,11 +12,15 @@ class WizardState:
     step: int = 1
     tenant_id: Optional[str] = None
     app_name: str = "M365 MCP Scanner"
-    az_logged_in: bool = False
+    bootstrap_token: Optional[str] = None
+    bootstrap_account: Optional[dict] = None
+    bootstrap_upn: Optional[str] = None
     provisioned_at: Optional[datetime] = None
     target_env_id: Optional[str] = None
     client_id: Optional[str] = None
     app_object_id: Optional[str] = None
+    pp_admin_role_assigned: Optional[bool] = None
+    pp_admin_role_error: Optional[str] = None
     step_2_editing: bool = False
     step_4_started: bool = False
     step_6_started: bool = False

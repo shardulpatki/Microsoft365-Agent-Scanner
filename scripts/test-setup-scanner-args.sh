@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+#
+# DEPRECATED 2026-05-18: The first-run wizard no longer calls
+# scripts/setup-scanner.sh; tests for that script are retained for
+# reference and rollback only. See
+# src/m365_mcp_scanner/provisioning/provisioner.py for the in-process
+# Python replacement (covered by tests/unit/provisioning/).
+#
 # test-setup-scanner-args.sh — smoke test for scripts/setup-scanner.sh.
 #
 # Verifies:
