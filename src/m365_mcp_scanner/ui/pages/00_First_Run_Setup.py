@@ -551,24 +551,32 @@ def _render_step_5() -> None:
         _advance(6)
 
 
+
 def _render_step_6() -> None:
-    st.header("Step 6 of 7 — Provision Dataverse access per environment")
+    st.header("Step 6 of 7 — Provision Power Platform access per environment")
     st.write(
-        "Power Platform admin user creation per environment is not exposed by "
-        "Microsoft as an API. Follow the deep link for each environment, then "
-        "click Re-check. You can skip environments — skipped ones will show "
-        "`no_dataverse_access` errors in scan output, which is correct "
-        "behavior."
+        "The scanner needs an application user in each Power Platform "
+        "environment. Select the environments to provision and click "
+        "**Provision selected** — the scanner will add itself via the BAP "
+        "`addAppUser` API. Environments you skip will surface "
+        "`no_dataverse_access` errors in scan output, which is the "
+        "expected behavior for unscanned environments."
     )
 
     settings = Settings()
+    wizard = st.session_state.wizard
+
     try:
         envs = list_environments_sync(settings)
     except Exception as exc:  # noqa: BLE001
         st.error(f"Could not list environments: {exc}")
-        envs = []
+        return
 
-    target = st.session_state.wizard.target_env_id
+    if not envs:
+        st.warning("No Power Platform environments visible to this account.")
+        return
+
+    target = wizard.target_env_id
     if target:
         matching = next(
             (e for e in envs if str(e.get("name")) == target),
@@ -580,37 +588,15 @@ def _render_step_6() -> None:
             )
             st.info(f"Highlighted environment: {display}")
 
-    with st.expander("Steps to provision an environment", expanded=False):
-        st.markdown(
-            "1. In the row below, click **Open in admin center**.\n"
-            "2. Click **+ New app user** at the top.\n"
-            "3. Click **+ Add an app**, search for the scanner app name, "
-            "select it, click **Add**.\n"
-            "4. Under **Security roles**, click the pencil icon, select "
-            "**System Administrator** (or a custom least-privilege role), "
-            "click **Save**.\n"
-            "5. Click **Create**. Return here and click **Re-check** on the "
-            "row.\n\n"
-            "(Source of truth: `docs/tenant-setup.md` §4 Step 6.)"
-        )
-
-    st.divider()
-    wizard = st.session_state.wizard
-    if envs:
-        header = st.columns([3, 4, 1, 2, 2])
-        header[0].write("**Environment**")
-        header[1].write("**Dataverse host**")
-        header[2].write("**Status**")
-        header[3].write("")
-        header[4].write("")
-        if not wizard.step_6_started:
-            wizard.step_6_started = True
-            status_placeholders: dict[str, Any] = {}
-            for env in envs:
-                env_id = str(env.get("name", ""))
-                status_placeholders[env_id] = env_row.render(
-                    env, settings, status_override="Checking…"
-                )
+    if not wizard.step_6_started:
+        wizard.step_6_started = True
+        status_placeholders: dict[str, Any] = {}
+        for env in envs:
+            env_id = str(env.get("name", ""))
+            status_placeholders[env_id] = env_row.render(
+                env, settings, status_override="Checking…"
+            )
+        try:
             results = asyncio.run(
                 wizard_logic.check_all_envs_dataverse(settings, envs)
             )
@@ -624,14 +610,98 @@ def _render_step_6() -> None:
                 placeholder = status_placeholders.get(env_id)
                 if placeholder is not None:
                     placeholder.write("✅" if passed else "❌")
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Initial status sweep failed: {exc}")
+        st.rerun()
+
+    st.divider()
+
+    sel_cols = st.columns([1, 1, 6])
+    if sel_cols[0].button("Select all", key="step6_select_all"):
+        wizard.step_6_selection = {
+            str(env.get("name", "")) for env in envs
+        }
+        st.rerun()
+    if sel_cols[1].button("Deselect all", key="step6_deselect_all"):
+        wizard.step_6_selection = set()
+        st.rerun()
+
+    header = st.columns([1, 3, 4, 1, 2])
+    header[0].write("")
+    header[1].write("**Environment**")
+    header[2].write("**Environment ID**")
+    header[3].write("**Status**")
+    header[4].write("")
+
+    def _toggle(env_id: str) -> None:
+        if env_id in wizard.step_6_selection:
+            wizard.step_6_selection.discard(env_id)
         else:
-            for env in envs:
-                env_row.render(env, settings)
-    else:
-        st.caption("No environments returned by Power Platform admin.")
+            wizard.step_6_selection.add(env_id)
+
+    def _retry(env: dict[str, Any]) -> None:
+        env_id = str(env.get("name", ""))
+        result = wizard_logic.provision_app_user_env_single(
+            env, settings, token=None
+        )
+        wizard.step_6_results[env_id] = result
+        st.rerun()
+
+    for env in envs:
+        env_id = str(env.get("name", ""))
+        env_row.render_step_6_row(
+            env=env,
+            is_selected=env_id in wizard.step_6_selection,
+            result=wizard.step_6_results.get(env_id),
+            on_toggle=_toggle,
+            on_retry=_retry,
+        )
+
+    st.divider()
+
+    selected_envs = [
+        e for e in envs if str(e.get("name", "")) in wizard.step_6_selection
+    ]
+    n_sel = len(selected_envs)
+    provision_disabled = n_sel == 0 or wizard.step_6_provisioning
+    button_label = (
+        f"Provision selected ({n_sel} env{'s' if n_sel != 1 else ''})"
+    )
+    if st.button(
+        button_label,
+        key="step6_provision",
+        type="primary",
+        disabled=provision_disabled,
+    ):
+        wizard.step_6_provisioning = True
+        try:
+            results = wizard_logic.provision_app_user_envs(
+                selected_envs, settings, token=None
+            )
+            wizard.step_6_results.update(results)
+        finally:
+            wizard.step_6_provisioning = False
+        st.rerun()
+
+    with st.expander("Manual fallback (admin center)"):
+        st.write(
+            "If automated provisioning fails or you prefer the manual path, "
+            "use the per-environment admin center links to add the "
+            "scanner's application user manually "
+            "(see `docs/tenant-setup.md` §4 Step 6)."
+        )
+        for env in envs:
+            env_id = str(env.get("name", ""))
+            display = (
+                (env.get("properties") or {}).get("displayName") or env_id
+            )
+            link = wizard_logic.admin_center_deep_link(env_id)
+            if link:
+                st.markdown(f"- [{display}]({link})")
+            else:
+                st.write(f"- {display} (no link available)")
 
     if st.button("Continue", type="primary"):
-        st.session_state.wizard.target_env_id = None
         _advance(7)
 
 

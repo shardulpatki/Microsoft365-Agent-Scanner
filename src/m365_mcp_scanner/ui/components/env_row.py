@@ -14,6 +14,9 @@ import streamlit as st
 
 from m365_mcp_scanner.auth import doctor
 from m365_mcp_scanner.config import Settings
+from m365_mcp_scanner.provisioning.app_user_provisioner import (
+    AppUserProvisionResult,
+)
 from m365_mcp_scanner.ui.wizard_logic import admin_center_deep_link
 
 
@@ -70,3 +73,47 @@ def render(
         st.rerun()
 
     return status_slot
+
+
+def render_step_6_row(
+    env: dict[str, Any],
+    is_selected: bool,
+    result: AppUserProvisionResult | None,
+    on_toggle: Any,
+    on_retry: Any,
+) -> None:
+    """Render one row in the Step 6 auto-provision table.
+
+    Columns: checkbox, display name, env id, status icon, retry button (only
+    rendered when ``result`` is an error).
+    """
+    env_id = str(env.get("name", ""))
+    properties = env.get("properties") or {}
+    display = properties.get("displayName") or env_id or "(unknown)"
+
+    if result is None:
+        status_icon = ""
+    elif result.status == "success":
+        status_icon = "✓"
+    else:
+        status_icon = "✗"
+
+    cols = st.columns([1, 3, 4, 1, 2])
+    new_selected = cols[0].checkbox(
+        " ",
+        value=is_selected,
+        key=f"step6_select_{env_id}",
+        label_visibility="collapsed",
+    )
+    if new_selected != is_selected:
+        on_toggle(env_id)
+
+    cols[1].write(display)
+    cols[2].code(env_id, language="text")
+    cols[3].write(status_icon)
+
+    if result is not None and result.status == "error":
+        if cols[4].button("Retry", key=f"step6_retry_{env_id}"):
+            on_retry(env)
+    else:
+        cols[4].write("")

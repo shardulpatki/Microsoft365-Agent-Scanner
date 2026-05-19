@@ -35,6 +35,11 @@ from m365_mcp_scanner.provisioning import (
     ProvisionResult,
     provision_scanner_app,
 )
+from m365_mcp_scanner.provisioning.app_user_provisioner import (
+    AppUserProvisionResult,
+    provision_app_user,
+    provision_app_user_batch,
+)
 from m365_mcp_scanner.ui.runners import stream_subprocess
 
 
@@ -370,6 +375,27 @@ async def check_all_envs_dataverse(
         *(doctor.check_dataverse(settings, env) for env in envs),
         return_exceptions=True,
     )
+
+
+def provision_app_user_envs(
+    envs: list[dict[str, Any]],
+    settings: Settings,
+    token: str | None,
+    concurrency: int = 8,
+) -> dict[str, AppUserProvisionResult]:
+    """Sync wrapper over :func:`provision_app_user_batch` for Streamlit."""
+    return asyncio.run(
+        provision_app_user_batch(envs, settings, token, concurrency)
+    )
+
+
+def provision_app_user_env_single(
+    env: dict[str, Any],
+    settings: Settings,
+    token: str | None,
+) -> AppUserProvisionResult:
+    """Sync wrapper over :func:`provision_app_user` for single-env retry."""
+    return asyncio.run(provision_app_user(env, settings, token))
 
 
 def verify_pp_registration_output(

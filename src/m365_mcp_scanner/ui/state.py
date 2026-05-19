@@ -3,9 +3,14 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import streamlit as st
+
+if TYPE_CHECKING:
+    from m365_mcp_scanner.provisioning.app_user_provisioner import (
+        AppUserProvisionResult,
+    )
 
 
 @dataclass
@@ -25,6 +30,11 @@ class WizardState:
     step_2_editing: bool = False
     step_4_started: bool = False
     step_6_started: bool = False
+    step_6_selection: set[str] = field(default_factory=set)
+    step_6_results: dict[str, "AppUserProvisionResult"] = field(
+        default_factory=dict
+    )
+    step_6_provisioning: bool = False
     powerplatform_signin_attempted: bool = False
     powerplatform_signin_succeeded: bool = False
 
