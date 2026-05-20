@@ -89,7 +89,7 @@ def test_needs_reset_when_fields_missing(
     from m365_mcp_scanner.ui.state import WizardState, _needs_reset
 
     stale = WizardState()
-    delattr(stale, "powerplatform_signin_attempted")
+    delattr(stale, "step_6_provisioning")
     fake_streamlit.session_state["wizard"] = stale  # type: ignore[attr-defined]
     assert _needs_reset("wizard", WizardState) is True
 
@@ -109,7 +109,7 @@ def test_init_session_state_resets_stale_wizard(
     from m365_mcp_scanner.ui.state import WizardState, init_session_state
 
     stale = WizardState()
-    delattr(stale, "powerplatform_signin_attempted")
+    delattr(stale, "step_6_provisioning")
     fake_streamlit.session_state["wizard"] = stale  # type: ignore[attr-defined]
 
     init_session_state()
@@ -117,5 +117,5 @@ def test_init_session_state_resets_stale_wizard(
     fresh = fake_streamlit.session_state["wizard"]  # type: ignore[attr-defined]
     assert fresh is not stale
     assert isinstance(fresh, WizardState)
-    assert hasattr(fresh, "powerplatform_signin_attempted")
-    assert fresh.powerplatform_signin_attempted is False
+    assert hasattr(fresh, "step_6_provisioning")
+    assert fresh.step_6_provisioning is False

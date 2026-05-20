@@ -35,8 +35,6 @@ class WizardState:
         default_factory=dict
     )
     step_6_provisioning: bool = False
-    powerplatform_signin_attempted: bool = False
-    powerplatform_signin_succeeded: bool = False
 
 
 @dataclass
