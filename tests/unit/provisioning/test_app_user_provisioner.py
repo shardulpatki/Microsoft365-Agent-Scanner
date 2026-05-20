@@ -36,6 +36,48 @@ def _env(env_id: str = "env-1") -> dict[str, Any]:
     }
 
 
+_DV_ORG = "https://org.crm.dynamics.com"
+
+
+def _env_with_dv(env_id: str = "env-1", org_url: str = _DV_ORG) -> dict[str, Any]:
+    env = _env(env_id)
+    env["properties"] = {
+        "linkedEnvironmentMetadata": {"instanceApiUrl": org_url},
+    }
+    return env
+
+
+def _patch_monotonic(
+    monkeypatch: pytest.MonkeyPatch, values: list[float]
+) -> None:
+    """Patch the provisioner's ``time.monotonic`` to return successive values."""
+    it = iter(values)
+    last = [values[-1] if values else 0.0]
+
+    def _fake_monotonic() -> float:
+        try:
+            v = next(it)
+        except StopIteration:
+            return last[0]
+        last[0] = v
+        return v
+
+    monkeypatch.setattr(
+        "m365_mcp_scanner.provisioning.app_user_provisioner.time.monotonic",
+        _fake_monotonic,
+    )
+
+
+def _patch_dv_token(monkeypatch: pytest.MonkeyPatch, token: str = "dv-token") -> None:
+    async def _fake(_org_url: str, _settings: Any) -> str:
+        return token
+
+    monkeypatch.setattr(
+        "m365_mcp_scanner.provisioning.app_user_provisioner._acquire_dv_token",
+        _fake,
+    )
+
+
 def _path(env_id: str) -> str:
     return (
         f"/providers/Microsoft.BusinessAppPlatform/scopes/admin"
@@ -175,3 +217,55 @@ async def test_batch_per_env_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
     successes = [eid for eid, r in results.items() if r.status == "success"]
     assert len(successes) == 19
     assert "env-7" not in successes
+
+
+async def test_provision_waits_for_dataverse_propagation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps = _patch_sleep(monkeypatch)
+    _patch_dv_token(monkeypatch)
+    _patch_monotonic(monkeypatch, [0.0, 0.1, 2.1])
+
+    with respx.mock(assert_all_called=True) as router:
+        router.post(f"{_BAP}{_path('env-1')}").mock(return_value=httpx.Response(200))
+        router.get(f"{_DV_ORG}/api/data/v9.2/WhoAmI").mock(
+            side_effect=[
+                httpx.Response(403),
+                httpx.Response(403),
+                httpx.Response(200, json={"UserId": "00000000-0000-0000-0000-0000"}),
+            ]
+        )
+        result = await provision_app_user(_env_with_dv(), _settings(), "tok")
+
+    assert sleeps == [2.0, 2.0]
+    assert result.status == "success"
+    assert result.http_status == 200
+
+
+async def test_provision_propagation_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_sleep(monkeypatch)
+    _patch_dv_token(monkeypatch)
+    _patch_monotonic(monkeypatch, [0.0, 30.0, 70.0])
+
+    with respx.mock(assert_all_called=True) as router:
+        router.post(f"{_BAP}{_path('env-1')}").mock(return_value=httpx.Response(200))
+        router.get(f"{_DV_ORG}/api/data/v9.2/WhoAmI").mock(
+            return_value=httpx.Response(403)
+        )
+        result = await provision_app_user(_env_with_dv(), _settings(), "tok")
+
+    assert result.status == "error"
+    assert result.error_code == "propagation_timeout"
+    assert result.error_message is not None
+    assert "60s" in result.error_message or "propagate" in result.error_message
+
+
+async def test_provision_skips_polling_for_non_dataverse_env() -> None:
+    with respx.mock(base_url=_BAP, assert_all_called=True) as router:
+        router.post(_path("env-1")).mock(return_value=httpx.Response(200))
+        result = await provision_app_user(_env(), _settings(), "tok")
+
+    assert result.status == "success"
+    assert result.http_status == 200
