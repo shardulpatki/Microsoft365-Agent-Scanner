@@ -32,6 +32,13 @@ DELEGATED_LOGIN_SCOPES: tuple[str, ...] = (
     "https://graph.microsoft.com/.default",
 )
 
+# AAD error codes that frequently appear during the ~10-30s after a fresh
+# Entra app+secret is provisioned, while MSAL's v2.0 token endpoint converges.
+# A retry within ~60s typically succeeds; anything else is a real failure.
+_RETRYABLE_AAD_CODES: tuple[str, ...] = ("AADSTS7000215", "AADSTS700016")
+_RETRY_DELAYS_SECONDS: tuple[int, ...] = (5, 10, 15, 20, 10)
+_RETRY_DEADLINE_SECONDS: float = 60.0
+
 
 class AuthError(RuntimeError):
     pass
@@ -68,14 +75,36 @@ class AppOnlyTokenProvider:
             return token
 
     def _acquire_blocking(self, scope: str) -> str:
-        result: dict[str, Any] = self._app.acquire_token_for_client(scopes=[scope])
-        if "access_token" not in result:
-            err = result.get("error_description") or result.get("error") or "unknown error"
-            raise AuthError(f"failed to acquire app-only token for {scope}: {err}")
-        access = str(result["access_token"])
-        expires_in = int(result.get("expires_in", 3600))
-        self._cache[scope] = _CachedToken(value=access, expires_at=time.time() + expires_in)
-        return access
+        deadline = time.monotonic() + _RETRY_DEADLINE_SECONDS
+        delays = iter(_RETRY_DELAYS_SECONDS)
+        while True:
+            result: dict[str, Any] = self._app.acquire_token_for_client(scopes=[scope])
+            if "access_token" in result:
+                access = str(result["access_token"])
+                expires_in = int(result.get("expires_in", 3600))
+                self._cache[scope] = _CachedToken(
+                    value=access, expires_at=time.time() + expires_in
+                )
+                return access
+            err = (
+                result.get("error_description")
+                or result.get("error")
+                or "unknown error"
+            )
+            if not any(code in err for code in _RETRYABLE_AAD_CODES):
+                raise AuthError(
+                    f"failed to acquire app-only token for {scope}: {err}"
+                )
+            delay = next(delays, None)
+            if delay is None or time.monotonic() + delay > deadline:
+                raise AuthError(
+                    f"failed to acquire app-only token for {scope} after retries: {err}"
+                )
+            logger.info(
+                "transient AAD error acquiring %s token; retrying in %ss: %s",
+                scope, delay, err,
+            )
+            time.sleep(delay)
 
 
 DeviceFlowCallback = Callable[[dict[str, Any]], None]

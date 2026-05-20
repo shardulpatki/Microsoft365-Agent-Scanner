@@ -21,6 +21,8 @@ from typing import Any
 
 import httpx
 
+from m365_mcp_scanner.auth.file_cache import clear_app_only_token_cache
+
 logger = logging.getLogger(__name__)
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -277,6 +279,8 @@ async def provision_scanner_app(
             "Assigning Power Platform Administrator role…",
         )
         pp_assigned, pp_err = await _assign_pp_admin_role(client, sp_id)
+
+    clear_app_only_token_cache()
 
     return ProvisionResult(
         client_id=client_id,

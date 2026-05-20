@@ -544,6 +544,19 @@ def _render_step_5() -> None:
         r.audience == "power_platform" and r.status == "pass" for r in results
     )
 
+    if not (graph_ok and pp_ok):
+        st.info(
+            "Entra can take 10–60 seconds to propagate a fresh app + secret "
+            "to MSAL. The doctor now retries automatically inside that "
+            "window. If a check is still ❌, click **Re-run** to try again."
+        )
+        if st.button(
+            "🔄 Re-run doctor check",
+            key="step5_rerun_doctor",
+            type="primary",
+        ):
+            st.rerun()
+
     if st.button(
         "Continue to environment provisioning",
         disabled=not (graph_ok and pp_ok),
