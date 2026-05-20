@@ -377,13 +377,30 @@ async def check_all_envs_dataverse(
     )
 
 
+def _acquire_pp_token(settings: Settings) -> str:
+    provider = AppOnlyTokenProvider(
+        tenant_id=settings.tenant_id,
+        client_id=settings.client_id,
+        client_secret=settings.client_secret.get_secret_value(),
+    )
+    return asyncio.run(
+        provider.get_token("https://service.powerapps.com/.default")
+    )
+
+
 def provision_app_user_envs(
     envs: list[dict[str, Any]],
     settings: Settings,
-    token: str | None,
+    token: str | None = None,
     concurrency: int = 8,
 ) -> dict[str, AppUserProvisionResult]:
-    """Sync wrapper over :func:`provision_app_user_batch` for Streamlit."""
+    """Sync wrapper over :func:`provision_app_user_batch` for Streamlit.
+
+    Acquires a Power Platform-audience token automatically when ``token`` is
+    ``None`` so the page can keep passing ``token=None``.
+    """
+    if token is None:
+        token = _acquire_pp_token(settings)
     return asyncio.run(
         provision_app_user_batch(envs, settings, token, concurrency)
     )
@@ -392,9 +409,11 @@ def provision_app_user_envs(
 def provision_app_user_env_single(
     env: dict[str, Any],
     settings: Settings,
-    token: str | None,
+    token: str | None = None,
 ) -> AppUserProvisionResult:
     """Sync wrapper over :func:`provision_app_user` for single-env retry."""
+    if token is None:
+        token = _acquire_pp_token(settings)
     return asyncio.run(provision_app_user(env, settings, token))
 
 
