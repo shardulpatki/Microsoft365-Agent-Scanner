@@ -290,17 +290,11 @@ If the automated pwsh path fails on a given machine, Step 4 falls back to the or
 
 See `docs/decisions/0001-power-platform-management-app-in-wizard.md` (including the 2026-05-15 update) for the full rationale.
 
-### 5.5 Step 2 prewarm of Add-PowerAppsAccount
+### 5.5 Step 4 — single pwsh session for sign-in and registration
 
-`Add-PowerAppsAccount` is the slow part of Step 4 — on first use it pops a browser sign-in and takes 20–60 seconds. The wizard offers to front-run it: Step 2 renders an explicit, optional **Sign in for Power Platform** button (in both display and edit modes). Clicking the button drives `wizard_logic.prewarm_powerapps_account()` synchronously under `st.spinner`, so the browser tab pops exactly when the operator asks for it — never as an unexplained background pop. The Confirm button remains the primary CTA and advances to Step 3 regardless of whether the operator did the Power Platform sign-in.
+`Add-PowerAppsAccount` and `New-PowerAppManagementApp` run together in one pwsh subprocess invoked from Step 4. The single-session design replaces an earlier two-process "prewarm" pattern that tried to cache the PowerApps sign-in between processes via a status file at `~/.m365-mcp-scanner/.prewarm-status`. That cache never worked: `Microsoft.PowerApps.Administration.PowerShell` does not persist credentials across pwsh processes, so the operator was prompted twice for the same identity. The single-process flow prompts exactly once and removes the status file, the prewarm helper, and the conditional script-selection logic in `run_pp_management_registration`.
 
-**Rendezvous via a status file.** `prewarm_powerapps_account` writes `~/.m365-mcp-scanner/.prewarm-status` (JSON: `{"status": "running" | "succeeded" | "failed", "completed_at": "..."}`) before yielding and again on completion. Step 4 reads this file via `wizard_logic.read_prewarm_status()` when its renderer runs. The contract is unchanged from the earlier daemon-thread implementation; only the trigger moved from "on Confirm click" to "on Sign-in button click."
-
-**Conditional pwsh command in Step 4.** If `read_prewarm_status() == "succeeded"`, Step 4 calls `run_pp_management_registration(client_id, skip_signin=True)` which omits `Add-PowerAppsAccount` from the inline script — registration runs against the cached session in ~5s. Any other status (`running`, `failed`, `not_started`, including the case where the operator skipped the Step 2 button) falls back to the full original sequence; Step 4 signs in itself.
-
-**Synchronous, no threads.** The previous implementation spawned a daemon thread on Confirm. That made the second browser tab appear unattributed ~1–3 s later. The replacement is a foreground call under `st.spinner` with a session-state `pp_signin_running` flag that disables the button while pwsh runs. No `threading` import in the page module.
-
-**Status indicator.** After the click handler returns, the wizard reruns and renders one of: "Not signed in yet" (default), "✓ Power Platform session ready", or "✗ Sign-in failed. Step 4 will sign in for you when it runs." (with an error-details expander showing the tail of the pwsh output). State persists in `WizardState.powerplatform_signin_attempted` / `.powerplatform_signin_succeeded`.
+`run_pp_management_registration(app_id)` shells `pwsh -NoProfile -Command "Import-Module … ; Add-PowerAppsAccount; New-PowerAppManagementApp -ApplicationId $env:MCP_APP_ID"`. `-NonInteractive` is intentionally omitted so `Add-PowerAppsAccount` can drive the device-code or browser prompt. The Step 4 renderer surfaces a one-line `st.info` banner above the run telling the operator a sign-in prompt will appear; the existing Manual fallback expander still documents the same two cmdlets for copy-paste use.
 
 ---
 

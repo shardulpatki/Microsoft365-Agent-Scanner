@@ -179,69 +179,6 @@ def _offer_device_code_fallback() -> None:
         st.code(msg, language="text")
 
 
-_PP_SIGNIN_OUTPUT_KEY = "_wizard_pp_signin_output"
-_PP_SIGNIN_RUNNING_KEY = "pp_signin_running"
-
-
-def _render_powerplatform_signin_section() -> None:
-    """Render the optional, operator-triggered Power Platform sign-in.
-
-    Clicking the button drives ``prewarm_powerapps_account`` synchronously
-    under ``st.spinner``. The status file rendezvous with Step 4 is
-    written by the generator itself, so Step 4 needs no changes.
-    """
-    wizard = st.session_state.wizard
-    st.subheader("Power Platform sign-in (optional)")
-    st.caption(
-        "Power Platform requires a separate Microsoft sign-in for its "
-        "PowerShell admin cmdlets. Signing in now takes ~10 seconds and "
-        "makes Step 4 run in ~5 seconds instead of ~30. You can skip "
-        "this — Step 4 will sign in for you if needed."
-    )
-
-    running = bool(st.session_state.get(_PP_SIGNIN_RUNNING_KEY, False))
-    clicked = st.button(
-        "Sign in for Power Platform",
-        type="primary",
-        disabled=running,
-        key="pp_signin_btn",
-    )
-
-    if wizard.powerplatform_signin_attempted:
-        if wizard.powerplatform_signin_succeeded:
-            st.success("✓ Power Platform session ready")
-        else:
-            st.error(
-                "✗ Sign-in failed. Step 4 will sign in for you when it runs."
-            )
-            tail = st.session_state.get(_PP_SIGNIN_OUTPUT_KEY) or []
-            if tail:
-                with st.expander("Error details"):
-                    st.code("\n".join(tail), language="text")
-    else:
-        st.caption("Not signed in yet")
-
-    if clicked:
-        st.session_state[_PP_SIGNIN_RUNNING_KEY] = True
-        output_lines: list[str] = []
-        last_rc: int | None = None
-        with st.spinner("Signing in to Power Platform…"):
-            try:
-                for line, code in wizard_logic.prewarm_powerapps_account():
-                    if line:
-                        output_lines.append(line)
-                    if code is not None:
-                        last_rc = code
-            except Exception as exc:  # noqa: BLE001 — surface to operator
-                output_lines.append(f"Error: {exc}")
-                last_rc = -1
-        wizard.powerplatform_signin_attempted = True
-        wizard.powerplatform_signin_succeeded = last_rc == 0
-        st.session_state[_PP_SIGNIN_OUTPUT_KEY] = output_lines[-20:]
-        st.session_state[_PP_SIGNIN_RUNNING_KEY] = False
-        st.rerun()
-
-
 def _render_step_2() -> None:
     st.header("Step 2 of 7 — Confirm tenant + app name")
     wizard = st.session_state.wizard
@@ -258,8 +195,6 @@ def _render_step_2() -> None:
         st.code(default_tenant, language="text")
         st.markdown("**App display name**")
         st.code(default_app_name, language="text")
-
-        _render_powerplatform_signin_section()
 
         col_a, col_b = st.columns([1, 1])
         confirm = col_a.button("Confirm and continue", type="primary")
@@ -280,8 +215,6 @@ def _render_step_2() -> None:
             wizard.step_2_editing = True
             st.rerun()
         return
-
-    _render_powerplatform_signin_section()
 
     with st.form("step2_form"):
         tenant_id = st.text_input(
@@ -411,22 +344,19 @@ def _render_step_4() -> None:
     st.subheader("App (client) ID")
     st.code(client_id, language="text")
 
-    log_area = st.empty()
+    st.info(
+        "PowerShell will open a sign-in prompt for your Power Platform "
+        "admin account. This is a one-time setup step."
+    )
 
-    prewarm_status = wizard_logic.read_prewarm_status()
-    skip_signin = prewarm_status == "succeeded"
-    if skip_signin:
-        st.caption(
-            "Power Platform sign-in was warmed up during Step 2 — this "
-            "should complete in ~5 seconds with no second browser pop."
-        )
+    log_area = st.empty()
 
     _render_step_4_manual_fallback(client_id)
 
     wizard = st.session_state.wizard
     if not wizard.step_4_started:
         wizard.step_4_started = True
-        _run_step_4_registration(client_id, log_area, skip_signin=skip_signin)
+        _run_step_4_registration(client_id, log_area)
     else:
         if st.button("Retry", type="primary", key="step4_retry"):
             wizard.step_4_started = False
@@ -436,8 +366,6 @@ def _render_step_4() -> None:
 def _run_step_4_registration(
     client_id: str,
     log_area: Any,
-    *,
-    skip_signin: bool,
 ) -> None:
     lines: list[str] = []
     rc: int | None = None
@@ -448,7 +376,7 @@ def _run_step_4_registration(
     ) as status:
         try:
             for line, code in wizard_logic.run_pp_management_registration(
-                client_id, skip_signin=skip_signin
+                client_id
             ):
                 if code is None:
                     if line:

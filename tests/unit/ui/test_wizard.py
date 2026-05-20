@@ -1,7 +1,6 @@
 """Unit tests for the Phase 4c wizard helpers (no Streamlit runtime)."""
 from __future__ import annotations
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -14,8 +13,6 @@ from m365_mcp_scanner.ui import wizard_logic
 from m365_mcp_scanner.ui.wizard_logic import (
     CliDetection,
     detect_cli,
-    prewarm_powerapps_account,
-    read_prewarm_status,
     run_pp_management_registration,
     validate_app_name,
     validate_env_id,
@@ -409,7 +406,6 @@ def test_run_pp_management_registration_passes_app_id(
     assert isinstance(cmd, list)
     assert cmd[0] == "pwsh"
     assert "-NoProfile" in cmd
-    assert "-NonInteractive" in cmd
     script = cmd[-1]
     assert isinstance(script, str)
     assert "$env:MCP_APP_ID" in script
@@ -548,8 +544,6 @@ def test_step_2_confirm_advances_with_defaults() -> None:
     assert "type=\"primary\"" in body
     assert "step_2_editing" in body
     assert "_advance(3)" in body
-    # Confirm no longer triggers the background prewarm.
-    assert "_kick_off_prewarm" not in body
 
 
 def test_step_2_edit_toggle_renders_form() -> None:
@@ -568,49 +562,6 @@ def test_step_2_edit_then_confirm_uses_edited_values() -> None:
     assert "wizard.tenant_id = tenant_id" in edit_body
     assert "wizard.app_name = app_name" in edit_body
     assert "_advance(3)" in edit_body
-    # Edit-mode submit no longer triggers the background prewarm.
-    assert "_kick_off_prewarm" not in edit_body
-
-
-def test_step_2_powerplatform_button_renders() -> None:
-    body = _page_source()
-    assert '"Sign in for Power Platform"' in body
-    assert "Power Platform sign-in (optional)" in body
-    # Rendered from Step 2 (both display and edit modes).
-    step_2 = _step_2_source()
-    assert step_2.count("_render_powerplatform_signin_section()") >= 2
-
-
-def test_step_2_powerplatform_button_calls_prewarm() -> None:
-    body = _page_source()
-    start = body.index("def _render_powerplatform_signin_section(")
-    end = body.index("def _render_step_2(")
-    helper = body[start:end]
-    assert "wizard_logic.prewarm_powerapps_account(" in helper
-    assert "st.spinner(" in helper
-    assert "powerplatform_signin_attempted" in helper
-    assert "powerplatform_signin_succeeded" in helper
-
-
-def test_step_2_confirm_works_without_powerplatform_signin() -> None:
-    # Confirm path advances to Step 3 independently of the Power Platform
-    # sign-in attempt — the sign-in is optional.
-    body = _step_2_source()
-    display_path = body.split('st.form("step2_form")')[0]
-    assert "_advance(3)" in display_path
-    assert "powerplatform_signin_attempted" not in display_path
-    assert "powerplatform_signin_succeeded" not in display_path
-
-
-def test_step_2_no_daemon_thread_on_confirm() -> None:
-    body = _page_source()
-    # The daemon-thread prewarm helper is gone; the threading import
-    # should no longer be needed by this page.
-    assert "_kick_off_prewarm" not in body
-    assert "import threading" not in body
-    assert "threading.Thread" not in body
-    # The misleading caption is gone too.
-    assert "second browser sign-in" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -636,116 +587,11 @@ def test_render_step_3_handles_pp_admin_role_failure() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Change 3 — prewarm Add-PowerAppsAccount
+# Step 4 — combined PowerApps sign-in + registration in one pwsh process
 # ---------------------------------------------------------------------------
 
 
-def _fake_stream_factory(yields: list[tuple[str, int | None]]):
-    def fake_stream(
-        cmd: list[str],
-        cwd: Path | None = None,
-        *,
-        env: dict[str, str] | None = None,
-        timeout_s: float | None = None,
-    ):
-        for item in yields:
-            yield item
-
-    return fake_stream
-
-
-def test_prewarm_writes_status_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        wizard_logic,
-        "stream_subprocess",
-        _fake_stream_factory([("hello", None), ("", 0)]),
-    )
-    status_path = tmp_path / ".prewarm-status"
-    list(prewarm_powerapps_account(status_path=status_path))
-    data = json.loads(status_path.read_text(encoding="utf-8"))
-    assert data["status"] == "succeeded"
-    assert "completed_at" in data
-
-
-def test_prewarm_writes_failed_status_on_nonzero_exit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        wizard_logic,
-        "stream_subprocess",
-        _fake_stream_factory([("err", None), ("", 2)]),
-    )
-    status_path = tmp_path / ".prewarm-status"
-    list(prewarm_powerapps_account(status_path=status_path))
-    data = json.loads(status_path.read_text(encoding="utf-8"))
-    assert data["status"] == "failed"
-
-
-def test_prewarm_writes_failed_status_on_missing_pwsh(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    def raising(*_a: object, **_kw: object):
-        raise FileNotFoundError("pwsh not on PATH")
-        yield  # pragma: no cover — make this a generator
-
-    monkeypatch.setattr(wizard_logic, "stream_subprocess", raising)
-    status_path = tmp_path / ".prewarm-status"
-    list(prewarm_powerapps_account(status_path=status_path))
-    data = json.loads(status_path.read_text(encoding="utf-8"))
-    assert data["status"] == "failed"
-
-
-def test_read_prewarm_status_returns_not_started_for_missing_file(
-    tmp_path: Path,
-) -> None:
-    assert read_prewarm_status(tmp_path / "does-not-exist") == "not_started"
-
-
-def test_read_prewarm_status_returns_not_started_for_malformed_file(
-    tmp_path: Path,
-) -> None:
-    p = tmp_path / ".prewarm-status"
-    p.write_text("not json", encoding="utf-8")
-    assert read_prewarm_status(p) == "not_started"
-
-
-def test_step_4_command_skips_signin_when_prewarm_succeeded(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_stream(
-        cmd: list[str],
-        cwd: Path | None = None,
-        *,
-        env: dict[str, str] | None = None,
-        timeout_s: float | None = None,
-    ):
-        captured["cmd"] = cmd
-
-        def _gen():
-            yield ("ok", None)
-            yield ("", 0)
-
-        return _gen()
-
-    monkeypatch.setattr(wizard_logic, "stream_subprocess", fake_stream)
-    list(
-        run_pp_management_registration(
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", skip_signin=True
-        )
-    )
-    cmd = captured["cmd"]
-    assert isinstance(cmd, list)
-    script = cmd[-1]
-    assert isinstance(script, str)
-    assert "Add-PowerAppsAccount" not in script
-    assert "New-PowerAppManagementApp" in script
-
-
-def test_step_4_command_includes_signin_when_prewarm_not_succeeded(
+def test_step_4_command_combines_signin_and_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, object] = {}
@@ -776,13 +622,7 @@ def test_step_4_command_includes_signin_when_prewarm_not_succeeded(
     script = cmd[-1]
     assert isinstance(script, str)
     assert "Add-PowerAppsAccount" in script
-    assert "New-PowerAppManagementApp" in script
-
-
-def test_render_step_4_branches_on_prewarm_status() -> None:
-    body = _step_4_source()
-    assert "wizard_logic.read_prewarm_status" in body
-    assert "skip_signin=skip_signin" in body
+    assert "New-PowerAppManagementApp -ApplicationId $env:MCP_APP_ID" in script
 
 
 def _step_6_source() -> str:
