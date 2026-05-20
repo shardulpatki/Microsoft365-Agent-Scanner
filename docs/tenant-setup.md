@@ -100,6 +100,14 @@ Probing is off by default. If your security policy disallows outbound calls to n
 
 This section walks through the six configuration steps required to provision the scanner against a fresh Microsoft 365 tenant. Each step is performed once, except Step 6, which is repeated per Power Platform environment.
 
+> **Automated alternative for Steps 1–5.** `scripts/setup-scanner.sh <tenant-id> <app-display-name>` performs Steps 1–5 (app registration, public-client flag, service principal, eight Graph permissions, admin consent, client secret, and the Power Platform Administrator role assignment) and writes the resulting `client_id` and `client_secret` to `~/.m365-mcp-scanner/.setup-output.json` (mode 600) for the first-run wizard to ingest. Step 6 (Dataverse application user per environment) remains manual. The manual click-through procedure below is fully supported and remains the source of truth for what each step does.
+>
+> Dependencies: `az` CLI ≥ 2.50.0 (signed in as Global Administrator in the target tenant) and `jq`. See the comment block at the top of the script for the manual verification checklist.
+>
+> `jq` is required because the generated `client_secret` can contain characters that need careful JSON escaping. Install with `apt-get install jq` (Debian/Ubuntu/WSL), `brew install jq` (macOS), or `winget install jqlang.jq` / `choco install jq` (Windows).
+>
+> See `docs/decisions/0001-power-platform-management-app-in-wizard.md` for the rationale behind handling the Power Platform Management App registration in the wizard rather than the script.
+
 ### Step 1: Create the Entra ID application registration
 
 Sign in to the Entra admin center as Global Administrator.
@@ -245,6 +253,18 @@ $env:M365_MCP_CLIENT_ID = "<your-app-id>"
 $env:M365_MCP_CLIENT_SECRET = "<your-secret>"
 ```
 
+### Configuration precedence
+
+When the same setting is provided by multiple sources, the scanner resolves it in this order (highest priority first):
+
+1. **Explicit init kwargs** — only used by tests and the setup wizard.
+2. **Environment variables** (`M365_MCP_*`) — preferred for CI and containers.
+3. **`~/.m365-mcp-scanner/config.toml`** — canonical operator config, written by the first-run wizard.
+4. **`.env` in the current working directory** — development convenience.
+5. **Built-in defaults**.
+
+Operators who export `M365_MCP_*` in their shell will see those values override anything the wizard writes to `config.toml`. That is intentional — environment variables stay highest-priority for CI/headless flows.
+
 ### Verify connectivity
 
 Before running a real scan, verify that the scanner can mint tokens for all three required audiences and reach each API surface:
@@ -266,6 +286,16 @@ If any check fails, the error message indicates which setup step needs revisitin
 - **Graph 401:** Admin consent missing (Step 3c) or wrong client_id/secret (Steps 1/4)
 - **Power Platform admin 403:** Role assignment not active (Step 5)
 - **Dataverse 403:** Application user missing in at least one environment (Step 6)
+
+> **Power Platform Management App registration.** The Power Platform admin API requires the service principal to be registered as a management app, separate from the directory-role assignment in Step 5. `scripts/setup-scanner.sh` does **not** perform this — the operator completes it either via the Streamlit wizard's "Register as Power Platform Management App" step (see `docs/ui-trd.md` §5), or manually:
+>
+> ```powershell
+> Install-Module Microsoft.PowerApps.Administration.PowerShell -Scope CurrentUser
+> Add-PowerAppsAccount
+> New-PowerAppManagementApp -ApplicationId <client_id>
+> ```
+>
+> Until this is done, `mcp-scan doctor` will report Power Platform admin calls returning 403.
 
 ### Enable delegated session (one-time, per machine)
 

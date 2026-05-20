@@ -274,18 +274,23 @@ class GraphClient(BaseAsyncClient):
         yield {}  # pragma: no cover - for type checker
 
     async def doctor_ping(self) -> tuple[bool, str]:
-        """Quick reachability + permission check used by `mcp-scan doctor`."""
+        """Quick reachability + permission check used by `mcp-scan doctor`.
+
+        Pings ``/v1.0/applications?$top=1`` — the most representative Graph
+        operation the scanner relies on, gated by ``Application.Read.All``
+        which is one of the scanner's core granted permissions.
+        """
         try:
             resp = await self.request(
-                "GET", "/external/connections", params={"$top": 1}
+                "GET", "/applications", params={"$top": 1}
             )
         except httpx.HTTPError as exc:
             return False, f"transport error: {exc}"
         if resp.status_code == 200:
             count = len(resp.json().get("value", []))
-            return True, f"Graph reachable; /external/connections returned 200 ({count} sample row(s))"
+            return True, f"Graph reachable; /applications returned 200 ({count} sample row(s))"
         if resp.status_code == 403:
-            return False, "403 Forbidden — missing ExternalConnection.Read.All app permission?"
+            return False, "403 Forbidden — Application.Read.All not granted to the scanner app"
         if resp.status_code == 401:
             return False, "401 Unauthorized — check tenant_id / client_id / client_secret"
         return False, f"unexpected status {resp.status_code}: {resp.text[:200]}"

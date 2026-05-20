@@ -132,3 +132,24 @@ def clear(
         cache_path.unlink()
     except FileNotFoundError:
         logger.debug("cache file already absent at %s (ok)", cache_path)
+
+
+def clear_app_only_token_cache(*, cache_dir: Path | None = None) -> None:
+    """Delete the on-disk MSAL cache file (and its salt).
+
+    Invoked by Step 3 after a fresh scanner app + secret is provisioned so a
+    token signed for a now-deleted app cannot be served on the next doctor
+    run. The file is shared across flows in this install; wiping it after
+    Step 3 also invalidates any cached bootstrap-admin session, which is
+    acceptable because Step 3 is the last point in the wizard that needs
+    that session.
+    """
+    d = _resolve_dir(cache_dir)
+    for filename in (CACHE_FILENAME, SALT_FILENAME):
+        p = d / filename
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.warning("failed to remove token cache file %s: %s", p, exc)

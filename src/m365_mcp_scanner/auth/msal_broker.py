@@ -32,6 +32,13 @@ DELEGATED_LOGIN_SCOPES: tuple[str, ...] = (
     "https://graph.microsoft.com/.default",
 )
 
+# AAD error codes that frequently appear during the ~10-30s after a fresh
+# Entra app+secret is provisioned, while MSAL's v2.0 token endpoint converges.
+# A retry within ~60s typically succeeds; anything else is a real failure.
+_RETRYABLE_AAD_CODES: tuple[str, ...] = ("AADSTS7000215", "AADSTS700016")
+_RETRY_DELAYS_SECONDS: tuple[int, ...] = (5, 10, 15, 20, 10)
+_RETRY_DEADLINE_SECONDS: float = 60.0
+
 
 class AuthError(RuntimeError):
     pass
@@ -68,14 +75,36 @@ class AppOnlyTokenProvider:
             return token
 
     def _acquire_blocking(self, scope: str) -> str:
-        result: dict[str, Any] = self._app.acquire_token_for_client(scopes=[scope])
-        if "access_token" not in result:
-            err = result.get("error_description") or result.get("error") or "unknown error"
-            raise AuthError(f"failed to acquire app-only token for {scope}: {err}")
-        access = str(result["access_token"])
-        expires_in = int(result.get("expires_in", 3600))
-        self._cache[scope] = _CachedToken(value=access, expires_at=time.time() + expires_in)
-        return access
+        deadline = time.monotonic() + _RETRY_DEADLINE_SECONDS
+        delays = iter(_RETRY_DELAYS_SECONDS)
+        while True:
+            result: dict[str, Any] = self._app.acquire_token_for_client(scopes=[scope])
+            if "access_token" in result:
+                access = str(result["access_token"])
+                expires_in = int(result.get("expires_in", 3600))
+                self._cache[scope] = _CachedToken(
+                    value=access, expires_at=time.time() + expires_in
+                )
+                return access
+            err = (
+                result.get("error_description")
+                or result.get("error")
+                or "unknown error"
+            )
+            if not any(code in err for code in _RETRYABLE_AAD_CODES):
+                raise AuthError(
+                    f"failed to acquire app-only token for {scope}: {err}"
+                )
+            delay = next(delays, None)
+            if delay is None or time.monotonic() + delay > deadline:
+                raise AuthError(
+                    f"failed to acquire app-only token for {scope} after retries: {err}"
+                )
+            logger.info(
+                "transient AAD error acquiring %s token; retrying in %ss: %s",
+                scope, delay, err,
+            )
+            time.sleep(delay)
 
 
 DeviceFlowCallback = Callable[[dict[str, Any]], None]
@@ -171,6 +200,39 @@ class DelegatedTokenProvider:
         self._app = None
         self._token_cache.clear()
 
+    async def start_device_flow(
+        self, scopes: list[str] | None = None
+    ) -> dict[str, Any]:
+        """Initiate device-code flow and return the MSAL flow dict.
+
+        The returned dict contains ``user_code``, ``verification_uri``, and
+        ``expires_in`` — the caller is responsible for surfacing the code to
+        the user and then passing the same dict to :meth:`complete_device_flow`.
+        """
+        scopes = scopes or list(DELEGATED_LOGIN_SCOPES)
+        app = self._get_app()
+        flow: dict[str, Any] = await asyncio.to_thread(
+            app.initiate_device_flow, scopes=scopes
+        )
+        if "user_code" not in flow:
+            err = flow.get("error_description") or flow.get("error") or "unknown error"
+            raise AuthError(f"device flow initiation failed: {err}")
+        return flow
+
+    async def complete_device_flow(self, flow: dict[str, Any]) -> dict[str, Any]:
+        """Block until the user completes the flow (or it times out), persist
+        the refresh token to the encrypted cache, and return the token result.
+        """
+        app = self._get_app()
+        result: dict[str, Any] = await asyncio.to_thread(
+            app.acquire_token_by_device_flow, flow
+        )
+        if "access_token" not in result:
+            err = result.get("error_description") or result.get("error") or "unknown error"
+            raise AuthError(f"device flow did not yield a token: {err}")
+        self._persist_cache()
+        return result
+
     async def login(
         self,
         *,
@@ -178,28 +240,10 @@ class DelegatedTokenProvider:
         on_prompt: DeviceFlowCallback | None = None,
     ) -> dict[str, Any]:
         """Run device-code flow, persist refresh token to keyring, return token result."""
-        scopes = scopes or list(DELEGATED_LOGIN_SCOPES)
-        result = await asyncio.to_thread(
-            self._login_blocking, scopes, on_prompt
-        )
-        self._persist_cache()
-        return result
-
-    def _login_blocking(
-        self, scopes: list[str], on_prompt: DeviceFlowCallback | None
-    ) -> dict[str, Any]:
-        app = self._get_app()
-        flow = app.initiate_device_flow(scopes=scopes)
-        if "user_code" not in flow:
-            err = flow.get("error_description") or flow.get("error") or "unknown error"
-            raise AuthError(f"device flow initiation failed: {err}")
+        flow = await self.start_device_flow(scopes=scopes)
         if on_prompt is not None:
-            on_prompt(flow)
-        result: dict[str, Any] = app.acquire_token_by_device_flow(flow)
-        if "access_token" not in result:
-            err = result.get("error_description") or result.get("error") or "unknown error"
-            raise AuthError(f"device flow did not yield a token: {err}")
-        return result
+            await asyncio.to_thread(on_prompt, flow)
+        return await self.complete_device_flow(flow)
 
     async def get_token(self, scope: str = GRAPH_DEFAULT_SCOPE) -> str:
         async with self._lock:
