@@ -121,7 +121,52 @@ until a public API ships.
 connectors that index external content into the search graph). That's what
 this scanner reports today.
 
-## Quickstart
+## Getting started
+
+The recommended way to set up the scanner is the interactive wizard:
+
+```bash
+pip install -e .[dev]
+mcp-scan ui
+```
+
+This opens a browser-based 7-step wizard on `http://127.0.0.1:8501`:
+
+1. **Prerequisites check** + interactive Microsoft Graph sign-in.
+2. **Admin / tenant confirmation** — confirms the signed-in user and
+   target tenant.
+3. **Scanner app provisioning** — creates the scanner Entra app,
+   service principal, and client secret, then applies admin consent
+   for the required Microsoft Graph permissions.
+4. **Power Platform Management App registration** — runs
+   `Add-PowerAppsAccount` and `New-PowerAppManagementApp` via `pwsh`
+   in one process so the scanner SP can reach Power Platform admin
+   APIs.
+5. **Verification doctor check** + optional interactive
+   browser-popup delegated sign-in for Copilot Packages.
+6. **Dataverse application user provisioning** — adds the scanner SP
+   as an application user in each selected Power Platform environment.
+7. **Completion** — wizard writes the resulting credentials to
+   `config.toml`.
+
+After Step 7, the scanner owns its own Entra app, Power Platform
+registration, and per-environment Dataverse access, and `mcp-scan run`
+works unattended off the saved configuration. The wizard handles Entra
+app creation, admin consent, the Power Platform Management App
+registration, and Dataverse application user provisioning
+automatically — the operator does not run any of those steps by hand.
+
+The wizard must be run by a user with sufficient admin rights (Global
+Administrator or equivalent), since it creates an app registration and
+grants admin consent.
+
+## Advanced: manual / CI setup
+
+This path is for CI, automation, or tenants already provisioned with a
+scanner app — it expects the operator to supply pre-created app
+credentials via environment variables (or a `.env` file). For
+interactive first-time setup, use the wizard described in *Getting
+started* above.
 
 ```bash
 pip install -e .[dev]
@@ -157,9 +202,17 @@ both `declarative_agents_packages` and `declarative_agents_teamsapp`.
 
 ### Delegated login (optional, for declarative agents)
 
+There are two ways to establish the delegated session — both produce
+the same encrypted cache on disk and either is sufficient:
+
+- **Wizard Step 5** offers an interactive browser-popup sign-in. This
+  is the recommended path when using the wizard.
+- **`mcp-scan login`** is the standalone CLI command. It uses the
+  device-code flow — print a code, visit the URL, paste, sign in —
+  and is appropriate for the manual / CI setup path.
+
 ```bash
-# One-time interactive login. Prints a device code; visit the URL, paste the
-# code, sign in. The refresh token is cached in an encrypted file (see below).
+# One-time interactive login (device-code flow).
 mcp-scan login
 
 # Confirm the session is active.
@@ -226,6 +279,9 @@ least-privilege initial deployment.
 
 **Power Platform admin** (one-time PowerShell registration of the SP, not a
 Graph permission):
+
+When using the wizard, Step 4 performs this registration automatically —
+the manual commands below are only needed for the manual / CI setup path.
 
 ```powershell
 # Run as Power Platform Administrator
