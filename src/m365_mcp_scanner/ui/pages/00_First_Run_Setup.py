@@ -628,28 +628,20 @@ def _render_step_6() -> None:
 
     if not wizard.step_6_started:
         wizard.step_6_started = True
-        status_placeholders: dict[str, Any] = {}
-        for env in envs:
-            env_id = str(env.get("name", ""))
-            status_placeholders[env_id] = env_row.render(
-                env, settings, status_override="Checking…"
-            )
-        try:
-            results = asyncio.run(
-                wizard_logic.check_all_envs_dataverse(settings, envs)
-            )
-            for env, result in zip(envs, results):
-                env_id = str(env.get("name", ""))
-                if isinstance(result, BaseException):
-                    passed = False
-                else:
-                    passed = result.status == "pass"
-                st.session_state.status.dataverse_envs[env_id] = passed
-                placeholder = status_placeholders.get(env_id)
-                if placeholder is not None:
-                    placeholder.write("✅" if passed else "❌")
-        except Exception as exc:  # noqa: BLE001
-            st.warning(f"Initial status sweep failed: {exc}")
+        with st.spinner("Checking Dataverse access for each environment…"):
+            try:
+                results = asyncio.run(
+                    wizard_logic.check_all_envs_dataverse(settings, envs)
+                )
+                for env, result in zip(envs, results):
+                    env_id = str(env.get("name", ""))
+                    if isinstance(result, BaseException):
+                        passed = False
+                    else:
+                        passed = result.status == "pass"
+                    st.session_state.status.dataverse_envs[env_id] = passed
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Initial status sweep failed: {exc}")
         st.rerun()
 
     st.divider()

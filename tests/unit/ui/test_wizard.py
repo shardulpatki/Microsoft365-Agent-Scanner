@@ -704,7 +704,6 @@ def test_step_6_auto_starts_on_landing() -> None:
     assert "wizard.step_6_started" in body
     assert "if not wizard.step_6_started:" in body
     assert "wizard.step_6_started = True" in body
-    assert 'status_override="Checking…"' in body
     # Concurrent fan-out via wizard_logic.check_all_envs_dataverse — no more
     # sequential asyncio.run inside the per-env loop.
     assert "wizard_logic.check_all_envs_dataverse(settings, envs)" in body
