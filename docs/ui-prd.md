@@ -5,6 +5,17 @@
 **Date:** 2026-05-13
 **Related docs:** `README.md`, `docs/tenant-setup.md`, `handover.md` Sections 2 & 8
 
+> **Status note (2026-05-21)** — This is the original Phase 4 planning
+> document, dated 2026-05-13. The wizard has since been built and has
+> evolved past several decisions recorded here. Where this document
+> diverges from shipped behavior, the code and the ADRs in
+> `docs/decisions/` are authoritative. Notably: §7.1's "manual-with-
+> deep-links" approach to Dataverse provisioning was superseded — the
+> wizard now provisions application users automatically via the Power
+> Platform BAP `addAppUser` API (see ADR-0004). Auth and provisioning
+> are in-process MSAL + direct Graph, not `az login` / `setup-scanner.sh`
+> (see ADR-0003). This document is retained as a planning record.
+
 ---
 
 ## 1. Summary

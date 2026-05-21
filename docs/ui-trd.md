@@ -12,6 +12,13 @@
 > `docs/decisions/0003-msal-and-direct-graph.md` for the architecture in
 > force and rationale. References below to the bash/az layer are retained
 > for rollback context only.
+>
+> **Update 2026-05-21** — Further divergence since the above: Dataverse
+> application-user provisioning is now via the BAP `addAppUser` API
+> (ADR-0004), the Power Platform sign-in "prewarm" pattern was removed
+> (Step 4 runs in one pwsh process), and Step 5 gained an interactive
+> browser-popup delegated sign-in. This document is a planning record;
+> the code and `docs/decisions/` are authoritative for current behavior.
 
 ---
 
