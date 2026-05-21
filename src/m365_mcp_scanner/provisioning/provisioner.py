@@ -180,6 +180,10 @@ async def provision_scanner_app(
 
         # --- Step 2: create application ---
         _emit(progress_callback, 2, f"Creating Entra app registration '{app_display_name}'…")
+        # publicClient.redirectUris must be registered up-front so the
+        # interactive browser-popup delegated sign-in on wizard Step 5 can
+        # complete its loopback redirect. Bare http://localhost matches any
+        # localhost port under MSAL's public-client handling.
         created = await _request(
             client,
             "POST",
@@ -188,8 +192,12 @@ async def provision_scanner_app(
             json_body={
                 "displayName": app_display_name,
                 "signInAudience": "AzureADMyOrg",
+                "publicClient": {"redirectUris": ["http://localhost"]},
             },
             expected=(201,),
+        )
+        logger.info(
+            "scanner app created with publicClient.redirectUris=['http://localhost']"
         )
         app_obj = created.json()
         app_object_id = str(app_obj["id"])
