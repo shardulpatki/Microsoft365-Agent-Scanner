@@ -29,6 +29,8 @@ End-to-end provisioning of permissions, app registration, role assignments, and 
 
 This runbook walks a tenant administrator through everything required to enable the M365 MCP Scanner against a Microsoft 365 tenant. Setup completes in approximately 30 minutes and consists of six distinct configuration steps.
 
+The recommended way to provision the scanner is the interactive wizard, `mcp-scan ui`, which performs every step in this runbook automatically. This runbook documents the same provisioning carried out manually — useful for CI / automation pipelines, for audit reviewers who need to see exactly what each step does, or for operators who prefer to click through the Microsoft admin portals themselves. See the README's *Getting started* section for the wizard.
+
 The scanner is a read-only security tool. It enumerates Model Context Protocol (MCP) server usage across the tenant by querying Microsoft Graph, Power Platform admin APIs, and Dataverse. It performs no write operations, no data modifications, and no automated remediation. All findings are stored locally on the operator's machine.
 
 ### What gets configured
@@ -100,13 +102,7 @@ Probing is off by default. If your security policy disallows outbound calls to n
 
 This section walks through the six configuration steps required to provision the scanner against a fresh Microsoft 365 tenant. Each step is performed once, except Step 6, which is repeated per Power Platform environment.
 
-> **Automated alternative for Steps 1–5.** `scripts/setup-scanner.sh <tenant-id> <app-display-name>` performs Steps 1–5 (app registration, public-client flag, service principal, eight Graph permissions, admin consent, client secret, and the Power Platform Administrator role assignment) and writes the resulting `client_id` and `client_secret` to `~/.m365-mcp-scanner/.setup-output.json` (mode 600) for the first-run wizard to ingest. Step 6 (Dataverse application user per environment) remains manual. The manual click-through procedure below is fully supported and remains the source of truth for what each step does.
->
-> Dependencies: `az` CLI ≥ 2.50.0 (signed in as Global Administrator in the target tenant) and `jq`. See the comment block at the top of the script for the manual verification checklist.
->
-> `jq` is required because the generated `client_secret` can contain characters that need careful JSON escaping. Install with `apt-get install jq` (Debian/Ubuntu/WSL), `brew install jq` (macOS), or `winget install jqlang.jq` / `choco install jq` (Windows).
->
-> See `docs/decisions/0001-power-platform-management-app-in-wizard.md` for the rationale behind handling the Power Platform Management App registration in the wizard rather than the script.
+> **Prefer the wizard.** `mcp-scan ui` performs all six steps below automatically against the signed-in tenant. The manual procedure that follows is the alternative for environments where the wizard cannot run (headless CI, air-gapped automation) or for operators who want to provision every artifact by hand.
 
 ### Step 1: Create the Entra ID application registration
 
@@ -203,6 +199,8 @@ If your tenant requires Privileged Identity Management (PIM) for admin roles, yo
 
 ### Step 6: Add the scanner as a Dataverse application user (per environment)
 
+The wizard's Step 6 performs this automatically for every selected environment via the Power Platform BAP `addAppUser` API; the click-through procedure below is the equivalent for the manual setup path.
+
 To discover Copilot Studio agents and their MCP wiring, the scanner reads Dataverse tables directly. Dataverse access is scoped per-environment and requires explicit user creation.
 
 > **Repeat this step for every Power Platform environment in scope.** At minimum, include the default environment and any environment where Copilot Studio is used. If you skip an environment, the scanner will produce a clean `no_dataverse_access` error for that environment rather than crashing — but it will not discover any agents there.
@@ -287,7 +285,7 @@ If any check fails, the error message indicates which setup step needs revisitin
 - **Power Platform admin 403:** Role assignment not active (Step 5)
 - **Dataverse 403:** Application user missing in at least one environment (Step 6)
 
-> **Power Platform Management App registration.** The Power Platform admin API requires the service principal to be registered as a management app, separate from the directory-role assignment in Step 5. `scripts/setup-scanner.sh` does **not** perform this — the operator completes it either via the Streamlit wizard's "Register as Power Platform Management App" step (see `docs/ui-trd.md` §5), or manually:
+> **Power Platform Management App registration.** The Power Platform admin API requires the service principal to be registered as a Power Platform Management App, separate from the directory-role assignment in Step 5. The `mcp-scan ui` wizard performs this automatically as part of its Step 4 (see `docs/ui-trd.md` §5). For the manual setup path, run it via PowerShell:
 >
 > ```powershell
 > Install-Module Microsoft.PowerApps.Administration.PowerShell -Scope CurrentUser
@@ -300,6 +298,8 @@ If any check fails, the error message indicates which setup step needs revisitin
 ### Enable delegated session (one-time, per machine)
 
 The two declarative-agent surfaces use delegated authentication. A one-time interactive sign-in is required before these surfaces will function. The cached refresh token persists for approximately 90 days.
+
+When using the wizard, Step 5 offers an interactive browser-popup sign-in for the delegated session; `mcp-scan login` is the standalone CLI equivalent and uses the device-code flow. Both produce the same cached session.
 
 ```bash
 mcp-scan login
@@ -347,7 +347,7 @@ mcp-scan run --probe
 
 **Cause:** This was an early issue with the keyring library's Windows Credential Manager backend, which cannot store MSAL token blobs exceeding ~2,560 bytes. The scanner now uses an encrypted file cache by default, which avoids this issue.
 
-**Fix:** Ensure you are running a recent version of the scanner. The file-based cache was introduced to bypass this Windows limitation entirely.
+**Fix:** The scanner no longer uses the Windows Credential Manager backend at all — it uses the encrypted file cache unconditionally — so this error cannot occur in current versions. The entry is retained only for operators on very old builds; if you encounter it, upgrade to a current release.
 
 ### Copilot Packages surface returns tenant_not_eligible
 
