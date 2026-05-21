@@ -25,6 +25,10 @@ from m365_mcp_scanner.auth.msal_bootstrap import (
     acquire_bootstrap_token,
     acquire_bootstrap_token_device_code,
 )
+from m365_mcp_scanner.auth.delegated_signin import (
+    DelegatedSigninResult,
+    interactive_delegated_signin,
+)
 from m365_mcp_scanner.auth.msal_broker import AppOnlyTokenProvider
 from m365_mcp_scanner.clients.power_platform_admin import PowerPlatformAdminClient
 from m365_mcp_scanner.config import Settings
@@ -172,6 +176,23 @@ def bootstrap_sign_in(
 ) -> BootstrapAuthResult:
     """Sync wrapper around :func:`acquire_bootstrap_token` for Streamlit."""
     return asyncio.run(acquire_bootstrap_token(tenant_id, timeout_s=timeout_s))
+
+
+def delegated_signin_sync(
+    tenant_id: str,
+    client_id: str,
+    timeout_s: int = 300,
+) -> DelegatedSigninResult:
+    """Sync wrapper for Streamlit: browser-popup delegated sign-in.
+
+    ``interactive_delegated_signin`` is already synchronous (it spawns its
+    own listener thread). The wrapper exists for symmetry with other
+    ``*_sync`` entry points so the Step 5 page imports only from
+    ``wizard_logic``.
+    """
+    return interactive_delegated_signin(
+        tenant_id=tenant_id, client_id=client_id, timeout_s=timeout_s
+    )
 
 
 def bootstrap_sign_in_device_code(

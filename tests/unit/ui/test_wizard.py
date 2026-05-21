@@ -456,6 +456,31 @@ def test_render_step_4_uses_pwsh_subprocess_and_fallback() -> None:
     assert "Manual fallback" in src  # rendered inside helper below step 4
 
 
+def test_render_step_5_has_delegated_signin_button() -> None:
+    """Step 5 surfaces the optional browser-popup delegated sign-in.
+
+    The button is rendered when the doctor's delegated row is non-pass;
+    it must not block the Continue button (delegated stays optional).
+    """
+    page = (
+        Path(__file__).resolve().parents[3]
+        / "src"
+        / "m365_mcp_scanner"
+        / "ui"
+        / "pages"
+        / "00_First_Run_Setup.py"
+    )
+    src = page.read_text(encoding="utf-8")
+    start = src.index("def _render_step_5(")
+    end = src.index("def _render_step_6(")
+    body = src[start:end]
+    assert "step5_delegated_signin" in body
+    assert "Sign in for declarative agent discovery" in body
+    assert "wizard_logic.delegated_signin_sync" in body
+    # Continue button stays gated only on Graph + PP, not delegated.
+    assert "disabled=not (graph_ok and pp_ok)" in body
+
+
 def test_render_step_7_finish_routes_to_status() -> None:
     """The Finish step's primary button routes to Status, not Run Scan."""
     page = (

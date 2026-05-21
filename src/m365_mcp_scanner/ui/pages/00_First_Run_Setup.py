@@ -37,6 +37,7 @@ from m365_mcp_scanner.auth.msal_bootstrap import (
     BootstrapAuthError,
     BootstrapAuthTimeout,
 )
+from m365_mcp_scanner.auth.msal_broker import AuthError, DelegatedTokenProvider
 from m365_mcp_scanner.config import Settings
 from m365_mcp_scanner.provisioning import ProvisionError
 from m365_mcp_scanner.ui.components import env_row
@@ -52,6 +53,7 @@ from m365_mcp_scanner.ui.wizard_logic import (
 DATA_DIR = Path.home() / ".m365-mcp-scanner"
 CONFIG_TOML = DATA_DIR / "config.toml"
 WIZARD_DONE_MARKER = DATA_DIR / ".wizard-completed"
+
 
 _LOG_KEYS = {
     "provision": "_wizard_provision_log",
@@ -485,11 +487,106 @@ def _render_step_5() -> None:
         ):
             st.rerun()
 
+    delegated = next(
+        (r for r in results if r.audience == "delegated"), None
+    )
+    if delegated is not None and delegated.status != "pass":
+        _render_step_5_delegated_signin(settings)
+
     if st.button(
         "Continue to environment provisioning",
         disabled=not (graph_ok and pp_ok),
     ):
         _advance(6)
+
+
+def _render_step_5_delegated_signin(settings: Settings) -> None:
+    """Optional in-wizard delegated sign-in.
+
+    Browser-popup auth-code is the default; device-code is offered only when
+    Entra rejects the loopback redirect (older scanner apps that predate the
+    publicClient.redirectUris registration). The delegated check stays
+    non-blocking either way — operators can ignore this and click Continue.
+    """
+    st.caption(
+        "Optional. Enables scanning of declarative agents via the Copilot "
+        "Packages API. You can skip this and scan Copilot Studio agents only."
+    )
+
+    if st.button(
+        "Sign in for declarative agent discovery",
+        key="step5_delegated_signin",
+    ):
+        st.info("A browser window will open for sign-in.")
+        # Step 3 pre-grants admin consent for the scanner app's delegated
+        # scopes, so this flow should be authentication-only. A consent
+        # prompt at this point indicates a Step 3 bug, not something to mask.
+        with st.spinner("Waiting for sign-in to complete…"):
+            result = wizard_logic.delegated_signin_sync(
+                settings.tenant_id, settings.client_id
+            )
+        if result.status == "success":
+            try:
+                st.session_state.status.delegated_account = result.detail
+            except AttributeError:
+                pass
+            st.success(f"Signed in as {result.detail}.")
+            st.rerun()
+        elif result.status == "needs_device_code":
+            st.session_state["step5_delegated_needs_device_code"] = True
+            st.warning(
+                "This scanner app was created before the browser redirect "
+                "URI was registered (AADSTS500113). Use device-code "
+                "sign-in instead."
+            )
+        else:
+            st.error(result.detail)
+
+    if st.session_state.get("step5_delegated_needs_device_code"):
+        try:
+            broker = DelegatedTokenProvider(
+                tenant_id=settings.tenant_id, client_id=settings.client_id
+            )
+        except AuthError as exc:
+            st.error(f"Delegated auth misconfigured: {exc}")
+            return
+
+        if st.button(
+            "Use device-code sign-in instead",
+            key="step5_delegated_signin_device",
+        ):
+            try:
+                flow = asyncio.run(broker.start_device_flow())
+            except AuthError as exc:
+                st.error(f"Could not start device flow: {exc}")
+            else:
+                st.session_state["step5_delegated_flow"] = flow
+
+        flow = st.session_state.get("step5_delegated_flow")
+        if flow is not None:
+            st.code(flow["user_code"], language="text")
+            st.link_button(
+                "Open Microsoft sign-in", flow["verification_uri"]
+            )
+            with st.spinner("Waiting for sign-in to complete…"):
+                try:
+                    asyncio.run(broker.complete_device_flow(flow))
+                except AuthError as exc:
+                    st.error(f"Sign-in failed: {exc}")
+                    st.session_state.pop("step5_delegated_flow", None)
+                else:
+                    st.session_state.pop("step5_delegated_flow", None)
+                    st.session_state.pop(
+                        "step5_delegated_needs_device_code", None
+                    )
+                    try:
+                        st.session_state.status.delegated_account = (
+                            broker.account_username()
+                        )
+                    except AttributeError:
+                        pass
+                    st.success("Signed in.")
+                    st.rerun()
 
 
 
